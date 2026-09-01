@@ -4,7 +4,7 @@
   "description": "Persistent CLI router for resuming named sessions across AI coding-agent backends.",
   "type": "module",
   "bin": {
-    "cli-relay": "./cli-relay.mjs"
+    "cli-relay": "cli-relay.mjs"
   },
   "engines": {
     "node": ">=18.17.0"
@@ -12,7 +12,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chsharoze/cli-relay.git"
+    "url": "git+https://github.com/chsharoze/cli-relay.git"
   },
   "keywords": [
     "ai",
