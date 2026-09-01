@@ -1,7 +1,7 @@
 # Pinned-facts ledger — design doc
 
 Status as of 2026-08-24: **built and live-tested on the `dev` branch** (separate git
-worktree, `~/Projects/route-cli-dev` — the live `main`/symlinked path was never touched
+worktree, `~/Projects/cli-relay-dev` — the live `main`/symlinked path was never touched
 during the build). Not yet merged to `main` — that's a deliberate, separate "go live" step.
 Verified live: injection works on resume (a fact never in the visible prompt came back
 correctly), and survives a `fresh` restart into a genuinely new native session. This doc
@@ -13,7 +13,7 @@ why, now annotated with what actually shipped.
 Everything shipped so far for the 2026-08-20 compaction-risk discussion (turn-count
 advisory, `compaction_detected` flag) is retrospective — it tells you something risky
 already happened, or is about to, and leaves recovery to a human noticing. This is the
-proactive answer: stop trying to detect or predict compaction, and instead make route-cli
+proactive answer: stop trying to detect or predict compaction, and instead make cli-relay
 independently own the facts that must survive it, external to whatever the backend's own
 memory does.
 
@@ -38,9 +38,9 @@ fresh, "recap on restart" stays a manual chore.
 Matches the existing `list`/`reset` housekeeping pattern:
 
 ```
-route-cli pin <thread> "<fact>"      — append (requires the thread to already exist, same as reset)
-route-cli unpin <thread> <index>     — remove by index
-route-cli pins <thread>              — list a thread's pins with their timestamps
+cli-relay pin <thread> "<fact>"      — append (requires the thread to already exist, same as reset)
+cli-relay unpin <thread> <index>     — remove by index
+cli-relay pins <thread>              — list a thread's pins with their timestamps
 ```
 
 `pin`/`unpin` mutate the map → `withLock`, exactly like `reset`. `pins` is read-only, no lock,
@@ -73,8 +73,8 @@ defeat a bad compaction.
 Soft, non-blocking advisory past a pin count (proposed: 8) — nudge toward curation, don't
 block. Past that point the honest move is a single curated recap, not a growing list — same
 "advisory, never blocks" posture as `RESUME_WARNING_THRESHOLD`. `reset` clears pins along
-with everything else (no special-casing — they're part of the thread record). `route-cli
-list` gets a `pins` count column; full text only via `route-cli pins <thread>`.
+with everything else (no special-casing — they're part of the thread record). `cli-relay
+list` gets a `pins` count column; full text only via `cli-relay pins <thread>`.
 
 Deliberately NOT building: auto-detecting "this looks like a correction" from prompt text to
 auto-pin it. That's guessing at intent — the same trap this whole project has avoided
@@ -82,16 +82,16 @@ everywhere else. Pinning is an explicit, deliberate act, always.
 
 ## Build workflow — how this gets shipped without touching the live path
 
-`~/bin/route-cli` is a symlink into `~/Projects/route-cli/route.mjs` on `main`, in this one
+`~/bin/cli-relay` is a symlink into `~/Projects/cli-relay/cli-relay.mjs` on `main`, in this one
 directory. A plain `git checkout -b dev` in this same directory would change the live file
 immediately — before a single line is finished, let alone merged. A branch alone doesn't
 protect anything if it's checked out where the symlink points.
 
 **Actual safe version: a separate git worktree.**
 ```
-git worktree add ../route-cli-dev dev
+git worktree add ../cli-relay-dev dev
 ```
-This gives `dev` its own directory and its own checked-out files. `~/Projects/route-cli`
+This gives `dev` its own directory and its own checked-out files. `~/Projects/cli-relay`
 stays on `main`, completely untouched, for the entire build — the live symlink never moves.
 "Go live" is a real, deliberate, single step later: merge `dev` into `main` in the original
 worktree, only when nothing's actively using it.
@@ -103,7 +103,7 @@ behavior, full Fable review pass (same as everything else in this repo), then me
 
 - Pin-count advisory threshold: **8** (`PIN_WARNING_THRESHOLD`), non-blocking, matches
   `RESUME_WARNING_THRESHOLD`'s posture.
-- Truncation in `pins <thread>`'s listing: **not needed.** `route-cli list`'s table only shows
+- Truncation in `pins <thread>`'s listing: **not needed.** `cli-relay list`'s table only shows
   a pin *count* column, never the fact text, so the cramped-table truncation concern that
   applies to session ids there doesn't apply here. `pins <thread>` is a dedicated command you
   run specifically to read the full text — showing it truncated there would be the wrong
@@ -117,10 +117,10 @@ behavior, full Fable review pass (same as everything else in this repo), then me
 - **Real gap, fixed:** `reset` destroyed pins silently while `fresh`'s overwrite warning
   explicitly reassures the user pins survive — backwards asymmetry, since the one operation
   that actually erases pins was the quiet one. `reset` now warns before deleting a thread with
-  pins, naming the count and pointing at `route-cli pins <thread>` to check first.
+  pins, naming the count and pointing at `cli-relay pins <thread>` to check first.
 - **Consistency nit, fixed:** `cmdPins`' "no such thread" path used `console.error` + direct
   `process.exit(1)` instead of throwing, the one place its discipline didn't match
-  `reset`/`unpin`. Now throws, propagating through `main().catch` for the same `route error: `
+  `reset`/`unpin`. Now throws, propagating through `main().catch` for the same `cli-relay error: `
   prefix and exit code everywhere else gets.
 - **Philosophy consistency, added:** `pins_injected` count added to the per-call JSON payload
   — every other per-call fact this router can know (turn count, compaction detection, resume

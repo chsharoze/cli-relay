@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke.sh — repeatable regression check for route.mjs.
+# smoke.sh — repeatable regression check for cli-relay.mjs.
 #
 # Exercises the real router against real backends (not mocks) — agy is used for anything
 # that costs money-per-call, since agy is free/cheap; codex is used only for the fast-fail
@@ -13,17 +13,17 @@
 # Usage: ./tests/smoke.sh
 
 set -uo pipefail
-ROUTE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/route.mjs"
+ROUTE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/cli-relay.mjs"
 CONFIG_MODULE="$(dirname "$ROUTE")/src/config.mjs"
 if ! MAP=$(node --input-type=module -e '
   import { pathToFileURL } from "node:url";
   const { MAP_PATH } = await import(pathToFileURL(process.argv[1]).href);
   process.stdout.write(MAP_PATH);
 ' "$CONFIG_MODULE"); then
-  echo "failed to resolve configured route session map" >&2
+  echo "failed to resolve configured cli-relay session map" >&2
   exit 1
 fi
-[ -n "$MAP" ] || { echo "configured route session map is empty" >&2; exit 1; }
+[ -n "$MAP" ] || { echo "configured cli-relay session map is empty" >&2; exit 1; }
 BACKUP="$MAP.smoke-backup.$$"
 PASS=0
 FAIL=0
@@ -120,7 +120,7 @@ cat > "$MAP" << 'EOF'
 EOF
 cd /tmp
 trip_out=$(node "$ROUTE" codex circuit-smoke resume "test" --skip-git-repo-check 2>&1); trip_code=$?
-# codex's own nonzero exit on a bad id means route exits 1, not 3 — see README exit-code table
+# codex's own nonzero exit on a bad id means cli-relay exits 1, not 3 — see README exit-code table
 check "circuit breaker 3rd-strike call" 1 "$trip_code"
 confirmed_after=$(python3 -c "import json; print(json.load(open('$MAP'))['sessions']['circuit-smoke']['confirmed'])")
 [ "$confirmed_after" = "False" ] && echo "PASS: thread auto-unconfirmed after 3 failures" && PASS=$((PASS+1)) || { echo "FAIL: still confirmed=$confirmed_after"; FAIL=$((FAIL+1)); }

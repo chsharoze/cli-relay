@@ -6,7 +6,7 @@ import { withThreadSuggestions } from '../core/thread-lookup.mjs';
 export async function cmdUnpin(thread, indexText) {
   const index = Number(indexText);
   if (!thread || !Number.isInteger(index) || index < 1) {
-    console.error('usage: route-cli unpin <thread> <index>  (1-based — see "route-cli pins <thread>")');
+    console.error('usage: cli-relay unpin <thread> <index>  (1-based — see "cli-relay pins <thread>")');
     process.exit(2);
   }
   await withLock(() => {

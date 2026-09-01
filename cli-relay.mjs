@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * route.mjs — persistent CLI router: resume-by-reference across pluggable backends.
+ * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   route-cli [--dry-run|--print-command] <backend> <thread> <fresh|resume> <prompt...>
- *   route-cli list
- *   route-cli doctor
- *   route-cli reset <thread>
- *   route-cli pin <thread> "<fact>"
- *   route-cli unpin <thread> <index>
- *   route-cli pins <thread>
+ *   cli-relay [--dry-run|--print-command] <backend> <thread> <fresh|resume> <prompt...>
+ *   cli-relay list
+ *   cli-relay doctor
+ *   cli-relay reset <thread>
+ *   cli-relay pin <thread> "<fact>"
+ *   cli-relay unpin <thread> <index>
+ *   cli-relay pins <thread>
  *
  * Exit codes:
  *   0  success
@@ -135,15 +135,15 @@ async function runHousekeeping(cliArgs) {
 
 function printUsage(backends) {
   console.error(
-    'usage: route-cli [--dry-run|--print-command] ' +
+    'usage: cli-relay [--dry-run|--print-command] ' +
     '<backend> <thread> <fresh|resume> <prompt...>',
   );
-  console.error('       route-cli list');
-  console.error('       route-cli doctor');
-  console.error('       route-cli reset <thread>');
-  console.error('       route-cli pin <thread> "<fact>"');
-  console.error('       route-cli unpin <thread> <index>');
-  console.error('       route-cli pins <thread>');
+  console.error('       cli-relay list');
+  console.error('       cli-relay doctor');
+  console.error('       cli-relay reset <thread>');
+  console.error('       cli-relay pin <thread> "<fact>"');
+  console.error('       cli-relay unpin <thread> <index>');
+  console.error('       cli-relay pins <thread>');
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
 
@@ -277,7 +277,7 @@ async function main() {
           `warning: thread "${thread}" is on turn ${session.turn_count} (advisory threshold ` +
           `${RESUME_WARNING_THRESHOLD}) — long-running threads risk silent context compaction ` +
           `inside the backend itself, where an earlier stale fact can outweigh a later ` +
-          `correction. Not blocking; pin anything load-bearing now (route-cli pin "${thread}" ` +
+          `correction. Not blocking; pin anything load-bearing now (cli-relay pin "${thread}" ` +
           `"...") if you haven't, then a fresh restart carries it forward automatically.`,
         );
       }
@@ -321,7 +321,7 @@ async function main() {
       const map = loadMap();
       const session = map.sessions[thread];
       if (!session) {
-        // A concurrent `route-cli reset <thread>` deleted this thread while the backend
+        // A concurrent `cli-relay reset <thread>` deleted this thread while the backend
         // call was in flight (the lock is intentionally released during the spawn — see
         // runChild). Don't resurrect a thread the user just told the router to forget;
         // the outcome has nowhere left to attach to.
@@ -402,7 +402,7 @@ async function main() {
     console.error(
       `"${backend}" thread "${thread}": ${resumeFailureCount} consecutive resume failures ` +
       `(threshold ${RESUME_FAILURE_THRESHOLD}) — auto-un-confirmed. The id is still recorded ` +
-      `(see "route-cli list") but resume is now refused; run fresh to continue this thread.`,
+      `(see "cli-relay list") but resume is now refused; run fresh to continue this thread.`,
     );
   }
 
@@ -447,7 +447,7 @@ function onSignal(signal) {
   interruptSignal = signal;
   if (activeChildPgid) {
     console.error(
-      `\nroute: ${signal} received — terminating child and recording outcome ` +
+      `\ncli-relay: ${signal} received — terminating child and recording outcome ` +
       '(Ctrl-C again to force)...',
     );
     try { process.kill(-activeChildPgid, 'SIGTERM'); } catch {}
@@ -458,11 +458,11 @@ function onSignal(signal) {
     }, SPAWN_KILL_GRACE_MS);
   } else if (childHasFinished) {
     console.error(
-      `\nroute: ${signal} received — finishing in-flight bookkeeping before exit ` +
+      `\ncli-relay: ${signal} received — finishing in-flight bookkeeping before exit ` +
       '(Ctrl-C again to force)...',
     );
   } else {
-    console.error(`\nroute: ${signal} received, nothing spawned yet — exiting.`);
+    console.error(`\ncli-relay: ${signal} received, nothing spawned yet — exiting.`);
     process.exit(interruptExitCode());
   }
 }
@@ -472,10 +472,10 @@ process.on('SIGTERM', () => onSignal('SIGTERM'));
 
 main().catch((error) => {
   if (error instanceof RouteError) {
-    const prefix = error.exitCode === 2 ? '' : 'route error: ';
+    const prefix = error.exitCode === 2 ? '' : 'cli-relay error: ';
     console.error(`${prefix}${error.message}`);
     process.exit(error.exitCode);
   }
-  console.error(`route error: ${error.message}`);
+  console.error(`cli-relay error: ${error.message}`);
   process.exit(1);
 });

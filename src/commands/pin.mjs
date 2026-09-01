@@ -7,7 +7,7 @@ import { withThreadSuggestions } from '../core/thread-lookup.mjs';
 export async function cmdPin(thread, factText) {
   const invalid = validatePinText(factText);
   if (!thread || invalid) {
-    console.error(`usage: route-cli pin <thread> "<fact>"${invalid ? ` — ${invalid}` : ''}`);
+    console.error(`usage: cli-relay pin <thread> "<fact>"${invalid ? ` — ${invalid}` : ''}`);
     process.exit(2);
   }
   await withLock(() => {

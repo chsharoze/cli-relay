@@ -1,15 +1,16 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const home = homedir();
 
-export const CONFIG_PATH = join(home, '.route-cli.config.json');
+export const STATE_DIR = join(home, '.cli-relay');
+export const CONFIG_PATH = join(STATE_DIR, 'config.json');
 export const MAP_VERSION = 1;
 
 export const DEFAULTS = Object.freeze({
-  MAP_PATH: join(home, '.route-sessions.json'),
-  USER_ADAPTERS_DIR: join(home, '.route-cli', 'adapters'),
+  MAP_PATH: join(STATE_DIR, 'sessions.json'),
+  USER_ADAPTERS_DIR: join(STATE_DIR, 'adapters'),
   SPAWN_TIMEOUT_MS: 20 * 60_000,
   SPAWN_KILL_GRACE_MS: 3_000,
   LOCK_TIMEOUT_MS: 10_000,
@@ -20,6 +21,8 @@ export const DEFAULTS = Object.freeze({
   PIN_WARNING_THRESHOLD: 8,
   MAX_PIN_LENGTH: 500,
 });
+
+mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
 
 function camelCase(name) {
   return name.toLowerCase().replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());

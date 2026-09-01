@@ -5,7 +5,7 @@ import { withThreadSuggestions } from '../core/thread-lookup.mjs';
 
 export async function cmdReset(thread) {
   if (!thread) {
-    console.error('usage: route-cli reset <thread>');
+    console.error('usage: cli-relay reset <thread>');
     process.exit(2);
   }
   await withLock(() => {
@@ -22,7 +22,7 @@ export async function cmdReset(thread) {
       console.error(
         `warning: thread "${thread}" has ${session.pinned_facts.length} pinned fact(s) that ` +
         `will be destroyed by reset — unlike a fresh restart, reset does not carry them ` +
-        `forward. Run "route-cli pins ${thread}" first if they're worth keeping.`,
+        `forward. Run "cli-relay pins ${thread}" first if they're worth keeping.`,
       );
     }
     delete map.sessions[thread];

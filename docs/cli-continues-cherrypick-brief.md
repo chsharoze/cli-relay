@@ -1,20 +1,20 @@
-# Cherry-pick brief: patterns from cli-continues → route-cli
+# Cherry-pick brief: patterns from cli-continues → cli-relay
 
-Context: route-cli is a zero-dependency Node.js CLI that routes prompts to four AI coding-agent
+Context: cli-relay is a zero-dependency Node.js CLI that routes prompts to four AI coding-agent
 CLIs (codex, agy, claude-code, command-code) and resumes a prior conversation by asking the
 backend to resume ITSELF via its own native flag (native resume-by-id, not transcript replay).
-It was recently modularized into `route.mjs` (orchestration only) + `src/{config,core,commands,
+It was recently modularized into `cli-relay.mjs` (orchestration only) + `src/{config,core,commands,
 adapters}/`. A separate, much larger project called `cli-continues` (github.com/yigitkonur/
 cli-continues, cloned read-only at `~/Projects/cli-continues` if you want to look at its actual
 source for inspiration — do NOT copy its transcript-parsing code, only the patterns below) was
 deep-dive audited by two independent models, and both converged on six specific, concrete
-patterns worth adapting into route-cli. Implement all six, adapted to route-cli's much simpler
+patterns worth adapting into cli-relay. Implement all six, adapted to cli-relay's much simpler
 scope — do not import cli-continues' dependencies (commander, chalk, zod, etc.) or its
-transcript-parsing/handoff layer. route-cli stays zero-npm-dependency, Node builtins only.
+transcript-parsing/handoff layer. cli-relay stays zero-npm-dependency, Node builtins only.
 
 ## The six changes
 
-1. **Adapter registry with a load-time completeness assertion.** route-cli already has a
+1. **Adapter registry with a load-time completeness assertion.** cli-relay already has a
    canonical list of backend names (derivable from `src/adapters/*.mjs` filenames via
    `loadAdapters()`). Add an explicit assertion at startup that every backend the router is
    configured to know about (define this as a single frozen array of expected backend names,
@@ -24,7 +24,7 @@ transcript-parsing/handoff layer. route-cli stays zero-npm-dependency, Node buil
    error at startup (`Adapter registry incomplete: missing or malformed adapter(s) for X` —
    list exactly which ones and why) rather than failing confusingly later on first use.
 
-2. **Injectable-predicate binary detection with fallback binary names, for a new `route-cli
+2. **Injectable-predicate binary detection with fallback binary names, for a new `cli-relay
    doctor` command.** Add a `doctor` housekeeping command (alongside list/reset/pin/unpin/pins)
    that checks each backend's binary is actually resolvable on PATH. Design:
    `resolveBinaryName(candidates, isAvailable = realWhichCheck)` where `candidates` is an
@@ -53,7 +53,7 @@ transcript-parsing/handoff layer. route-cli stays zero-npm-dependency, Node buil
    critical paths (backend-not-found, mode validation, thread-ownership mismatch, no-confirmed-
    session-for-resume) with a small `RouteError` class carrying a `code` and optional
    `exitCode`/`cause`, defined once (e.g. `src/core/errors.mjs`), and handle it once in
-   `main().catch()` at the bottom of route.mjs — preserving the EXACT same user-facing error
+   `main().catch()` at the bottom of cli-relay.mjs — preserving the EXACT same user-facing error
    text and exit codes as today (this is a refactor of error plumbing, not a behavior change).
    Every existing exit code (0/1/2/3, plus the signal-derived 128+n codes) must be identical
    after this change — verify by diffing `tests/smoke.sh` output before/after.

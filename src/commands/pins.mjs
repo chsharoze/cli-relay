@@ -4,7 +4,7 @@ import { withThreadSuggestions } from '../core/thread-lookup.mjs';
 
 export function cmdPins(thread) {
   if (!thread) {
-    console.error('usage: route-cli pins <thread>');
+    console.error('usage: cli-relay pins <thread>');
     process.exit(2);
   }
   const map = loadMap();

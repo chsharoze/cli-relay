@@ -109,7 +109,7 @@ export async function withLock(fn) {
       }
       if (eligible && reclaim(holderRaw)) continue;
       if (Date.now() > deadline) {
-        throw new Error(`another route invocation holds the lock (${LOCK_PATH}) — not waiting forever`);
+        throw new Error(`another cli-relay invocation holds the lock (${LOCK_PATH}) — not waiting forever`);
       }
       await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
     }

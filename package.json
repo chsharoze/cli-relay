@@ -1,0 +1,33 @@
+{
+  "name": "cli-relay",
+  "version": "1.0.0",
+  "description": "Persistent CLI router for resuming named sessions across AI coding-agent backends.",
+  "type": "module",
+  "bin": {
+    "cli-relay": "./cli-relay.mjs"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chsharoze/cli-relay.git"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-agents",
+    "session-resume",
+    "router",
+    "codex",
+    "claude-code"
+  ],
+  "files": [
+    "cli-relay.mjs",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {}
+}
