@@ -51,7 +51,7 @@ transcript-parsing/handoff layer. cli-relay stays zero-npm-dependency, Node buil
 
 4. **Minimal typed error model.** Replace ad-hoc `throw new Error(...)` call sites in the
    critical paths (backend-not-found, mode validation, thread-ownership mismatch, no-confirmed-
-   session-for-resume) with a small `RouteError` class carrying a `code` and optional
+   session-for-resume) with a small `RelayError` class carrying a `code` and optional
    `exitCode`/`cause`, defined once (e.g. `src/core/errors.mjs`), and handle it once in
    `main().catch()` at the bottom of cli-relay.mjs — preserving the EXACT same user-facing error
    text and exit codes as today (this is a refactor of error plumbing, not a behavior change).

@@ -98,18 +98,18 @@ lives under `src/`:
   (case-insensitive substring match, either direction, up to 3 candidates — not a fuzzy-
   distance algorithm, and it only fires when the thread doesn't exist at all, never when it
   exists but is merely unconfirmed).
-- `src/core/errors.mjs` — `RouteError`, a minimal typed error (`code`, `exitCode`, `cause`)
+- `src/core/errors.mjs` — `RelayError`, a minimal typed error (`code`, `exitCode`, `cause`)
   used at the hot-path throw sites, handled once in `main().catch()`. Preserves the exact
   original exit codes and message text for every pre-existing error path — including the
   asymmetry where a usage error (exit 2) prints with no `cli-relay error:` prefix while
-  everything else (exit 1) does; that split existed before `RouteError` did and is
+  everything else (exit 1) does; that split existed before `RelayError` did and is
   intentional, not something to "fix" into consistency.
 - `src/commands/` — `list`/`reset`/`pin`/`unpin`/`pins`/`doctor`, one file each.
 - `src/adapter-loader.mjs` — discovery, validation, and the `assertAdapterRegistry`
   completeness check described above.
 - `src/adapters/` — one file per backend.
 
-Six of these pieces (the registry completeness assertion, `doctor`, the `RouteError` model,
+Six of these pieces (the registry completeness assertion, `doctor`, the `RelayError` model,
 `--dry-run`, did-you-mean, and an audit of thread-identity ambiguity that concluded no change
 was needed) were adapted from patterns found in a much larger sibling project,
 [cli-continues](https://github.com/yigitkonur/cli-continues) — full brief in
@@ -219,7 +219,7 @@ context on how the branch was built) then adversarially audited it: found the sa
 "run-already-in-flight" check, not just the confirmation check) and a broken *custom*-named
 external adapter crashing the entire load — including `doctor`, the one command meant to
 diagnose exactly that. Both fixed and verified live. The audit's one headline finding (a
-claimed exit-code regression in the new `RouteError` paths) was checked directly against
+claimed exit-code regression in the new `RelayError` paths) was checked directly against
 `main`'s actual pre-refactor source and found to be a false positive — the audit had
 correctly flagged its own uncertainty (its sandbox blocked `git` access) rather than
 asserting it, which is why it was checked rather than trusted or dismissed outright. Full

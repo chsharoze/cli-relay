@@ -34,7 +34,7 @@ import {
   SPAWN_TIMEOUT_MS,
 } from './src/config.mjs';
 import { scrubEnv } from './src/core/env.mjs';
-import { RouteError } from './src/core/errors.mjs';
+import { RelayError } from './src/core/errors.mjs';
 import { withLock } from './src/core/lock.mjs';
 import { loadMap, saveMap } from './src/core/map-store.mjs';
 import { buildPinnedBlock } from './src/core/pins.mjs';
@@ -155,7 +155,7 @@ function sessionForInvocation(map, backend, thread, mode, adapter) {
     confirmed: false,
   };
   if (session.backend !== backend) {
-    throw new RouteError(
+    throw new RelayError(
       'THREAD_OWNERSHIP_MISMATCH',
       `thread "${thread}" belongs to backend "${session.backend}", not "${backend}" — ` +
       'pick a new thread name',
@@ -163,7 +163,7 @@ function sessionForInvocation(map, backend, thread, mode, adapter) {
   }
   if (mode === 'resume') {
     if (!adapter.resume) {
-      throw new RouteError(
+      throw new RelayError(
         'RESUME_UNSUPPORTED',
         `"${backend}" has no supported resume command in this router — must run fresh`,
       );
@@ -171,7 +171,7 @@ function sessionForInvocation(map, backend, thread, mode, adapter) {
     if (!session.confirmed || !session.native_session_id) {
       const message = `no confirmed session for thread "${thread}" — ` +
         'run fresh first; refusing to guess';
-      throw new RouteError(
+      throw new RelayError(
         'NO_CONFIRMED_SESSION',
         existing ? message : withThreadSuggestions(message, map.sessions, thread),
       );
@@ -188,7 +188,7 @@ function assertNotInFlight(session, thread) {
   if (session.status !== 'running') return;
   const ageMs = Date.now() - Date.parse(session.run_started_iso || 0);
   if (Number.isFinite(ageMs) && ageMs < LOCK_STALE_MS) {
-    throw new RouteError(
+    throw new RelayError(
       'RUN_IN_FLIGHT',
       `thread "${thread}" has a run already in flight (started ` +
       `${session.run_started_iso}) — refusing a concurrent turn on the same native session`,
@@ -227,14 +227,14 @@ async function main() {
   }
   const adapter = adapters[backend];
   if (!adapter) {
-    throw new RouteError(
+    throw new RelayError(
       'BACKEND_NOT_FOUND',
       `unknown backend "${backend}" — choose one of: ${Object.keys(adapters).join(', ')}`,
       { exitCode: 2 },
     );
   }
   if (mode !== 'fresh' && mode !== 'resume') {
-    throw new RouteError(
+    throw new RelayError(
       'INVALID_MODE',
       `mode must be "fresh" or "resume", got "${mode}"`,
       { exitCode: 2 },
@@ -471,7 +471,7 @@ process.on('SIGINT', () => onSignal('SIGINT'));
 process.on('SIGTERM', () => onSignal('SIGTERM'));
 
 main().catch((error) => {
-  if (error instanceof RouteError) {
+  if (error instanceof RelayError) {
     const prefix = error.exitCode === 2 ? '' : 'cli-relay error: ';
     console.error(`${prefix}${error.message}`);
     process.exit(error.exitCode);
