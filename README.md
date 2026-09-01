@@ -1,5 +1,7 @@
 # cli-relay — persistent CLI router
 
+Built by [RevOpsDev](https://revopsdev.com).
+
 Resume-by-reference delegation across codex, agy, claude-code (command-code: fresh-only).
 Built 2026-08-16/17, inspired by DeepSeek Harness's subagent architecture but deliberately
 smaller — see design history below before re-deriving any of this from scratch.
