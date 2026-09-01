@@ -16,6 +16,19 @@ npm install --global cli-relay
 
 The package has no runtime dependencies. Installation exposes the `cli-relay` command.
 
+## Prerequisites
+
+cli-relay routes between AI coding-agent CLIs — it doesn't include or replace them. Install
+whichever of these you actually use (you don't need all four; `cli-relay doctor` after
+installing any of them confirms cli-relay can see it):
+
+- **codex** — `npm install -g @openai/codex`, then `codex login`
+- **claude-code** — `npm install -g @anthropic-ai/claude-code`, then run `claude` once to
+  authenticate
+- **agy** (Google's Antigravity CLI) — macOS: `brew install --cask antigravity-cli`; other
+  platforms: see [antigravity.google/product/antigravity-cli](https://antigravity.google/product/antigravity-cli)
+- **command-code** — `npm install -g command-code`, then `command-code login`
+
 ## Usage
 
 ```

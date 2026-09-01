@@ -20,6 +20,7 @@ export default {
   name: 'codex',
   order: 10,
   binaryCandidates: ['codex'],
+  installHint: 'npm install -g @openai/codex, then: codex login',
   fresh: (prompt) => [
     'codex', 'exec', '--skip-git-repo-check', '--sandbox', 'workspace-write',
     '-m', 'gpt-5.6-sol', '--json', prompt,

@@ -5,6 +5,7 @@ export default {
   name: 'claude-code',
   order: 30,
   binaryCandidates: ['claude'],
+  installHint: 'npm install -g @anthropic-ai/claude-code, then run: claude (once, to authenticate)',
   fresh: (prompt) => [
     'claude', '-p', prompt, '--output-format', 'json', '--dangerously-skip-permissions',
   ],

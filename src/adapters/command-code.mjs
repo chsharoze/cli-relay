@@ -5,6 +5,7 @@ export default {
   name: 'command-code',
   order: 40,
   binaryCandidates: ['command-code'],
+  installHint: 'npm install -g command-code, then: command-code login',
   fresh: (prompt) => [
     'command-code', '-p', prompt, '-m', 'zai-org/glm-5.2', '--output-format', 'json',
     '--trust', '--no-auto-update',

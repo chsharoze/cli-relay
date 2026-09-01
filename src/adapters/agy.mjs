@@ -5,6 +5,7 @@ export default {
   name: 'agy',
   order: 20,
   binaryCandidates: ['agy'],
+  installHint: 'macOS: brew install --cask antigravity-cli — other platforms: https://antigravity.google/product/antigravity-cli',
   fresh: (prompt) => [
     'agy', '--dangerously-skip-permissions', '--print-timeout', '10m',
     '--model', 'gemini-3.6-flash-medium', '--add-dir', process.cwd(),

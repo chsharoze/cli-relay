@@ -53,7 +53,8 @@ export async function cmdDoctor(adapters, isAvailable = realWhichCheck) {
         `${check.adapter.name}: available (found; tried: ${tried}; resolved: ${resolved})`,
       );
     } else {
-      console.log(`${check.adapter.name}: unavailable (not found; tried: ${tried})`);
+      const hint = check.adapter.installHint ? ` — install: ${check.adapter.installHint}` : '';
+      console.log(`${check.adapter.name}: unavailable (not found; tried: ${tried})${hint}`);
     }
   }
 }
