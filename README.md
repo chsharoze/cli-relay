@@ -6,6 +6,22 @@ Resume-by-reference delegation across codex, agy, claude-code (command-code: fre
 Built 2026-08-16/17, inspired by DeepSeek Harness's subagent architecture but deliberately
 smaller — see design history below before re-deriving any of this from scratch.
 
+## Built for your agent to drive, not just for you to type
+
+cli-relay is designed to be called *by your own coding agent* as a tool, not only typed by
+hand. Every `fresh`/`resume` call returns one structured JSON object on stdout — a native
+session id, the model's answer, exit code, timing/signal info — specifically so an agent can
+parse the result and decide what to do next without guessing at free-form text. Exit codes are
+deliberate and stable (0 success, 1 general error, 2 usage error, 3 "ran but produced no usable
+answer" — see Exit codes below) so an agent's own control flow can branch on them directly.
+
+In practice that means: point your daily-driver agent (Claude Code, Codex, whatever you're
+already using) at this README and ask it to use `cli-relay` to delegate a task to a different
+backend, or to resume a thread from three days ago — it has everything it needs in this file
+and in `cli-relay doctor`'s output to do that itself, without you hand-holding it through the
+CLI's own flags. Nothing about this requires an agent, though — every command works exactly the
+same typed directly into a terminal by hand.
+
 ## Installation
 
 Requires Node.js 18.17 or newer.
