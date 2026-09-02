@@ -1,6 +1,6 @@
 {
   "name": "cli-relay",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Persistent CLI router for resuming named sessions across AI coding-agent backends.",
   "type": "module",
   "bin": {
