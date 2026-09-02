@@ -12,8 +12,9 @@ cli-relay is designed to be called *by your own coding agent* as a tool, not onl
 hand. Every `fresh`/`resume` call returns one structured JSON object on stdout — a native
 session id, the model's answer, exit code, timing/signal info — specifically so an agent can
 parse the result and decide what to do next without guessing at free-form text. Exit codes are
-deliberate and stable (0 success, 1 general error, 2 usage error, 3 "ran but produced no usable
-answer" — see Exit codes below) so an agent's own control flow can branch on them directly.
+deliberate and stable (0 success, 1 general error — including `doctor` when no backend at
+all is usable, 2 usage error, 3 "ran but produced no usable answer" — see Exit
+codes below) so an agent's own control flow can branch on them directly.
 
 In practice that means: point your daily-driver agent (Claude Code, Codex, whatever you're
 already using) at this README and ask it to use `cli-relay` to delegate a task to a different
@@ -60,9 +61,16 @@ cli-relay pins <thread>
 Backends: `codex`, `agy`, `claude-code`, `command-code` (command-code is fresh-only —
 its resume showed a reproducible seed-turn bug live, see file header).
 
-`cli-relay doctor` checks that every backend's binary is actually resolvable on PATH —
+`cli-relay doctor` checks that each backend's binary is actually resolvable on PATH —
 useful after a fresh machine setup or when a backend call fails and you're not sure whether
-it's cli-relay or the backend itself. `--dry-run` / `--print-command` prints the exact argv
+it's cli-relay or the backend itself. It exits 1 only when *no* backend at all is usable
+(zero of the built-in codex/agy/claude-code/command-code binaries resolve) — a genuinely
+broken install with nothing working. A partial install (1-3 of the four present) is the
+documented normal setup (see Prerequisites: "you don't need all four") and exits 0, so the
+gate catches "nothing works here" without punishing "not everything installed". Custom user
+adapters are reported in its output but don't affect the exit code (they're optional by
+definition). `--dry-run` /
+`--print-command` prints the exact argv
 that would be spawned (prompt fully assembled, pins injected) without spawning anything or
 touching the session map at all — it enforces the same refusals a real run would (e.g. won't
 preview a `resume` on an unconfirmed thread, won't preview against a thread with a run
@@ -100,8 +108,11 @@ their configured base values.
 
 Built-in adapters live in `src/adapters/` and are discovered at runtime. Additional `.mjs`,
 `.js`, or `.cjs` adapters can be placed in `~/.cli-relay/adapters/`; an adapter with the same
-`name` as a built-in replaces it. Each adapter provides `fresh`, optional `resume`, `env`,
-`parse`, optional `checkCompaction`, and optional `binaryCandidates` (an ordered list of
+`name` as a built-in replaces it. Note that `.js` files load as CommonJS unless a
+`~/.cli-relay/package.json` sets `"type": "module"` — write ESM adapters as `.mjs` (an
+ESM-syntax `.js` file fails to load and is skipped with a warning). Each adapter provides
+`fresh`, optional `resume`, `env`, `parse`, optional `checkCompaction`, and optional
+`binaryCandidates` (an ordered list of
 binary names `doctor` tries — most adapters only need one, but a backend that ships under
 more than one binary name can list several). Housekeeping commands are dispatched before
 adapter discovery, so they remain available if an adapter cannot be loaded. A malformed
@@ -153,9 +164,13 @@ Backs up and restores your actual `~/.cli-relay/sessions.json` around the run, s
 time. Covers: list/reset, fresh→resume context retention (agy), the circuit breaker's actual
 3-strikes trip (live-fired against codex with a bad id, not just traced), SIGINT mid-run
 cleanup, and SIGINT while genuinely pre-spawn (lock held elsewhere — must abort immediately
-without spawning). 32/32 passing as of the last run. Does not exercise `claude-code` (real
-billing per call) or `command-code` resume (disabled). Also does not yet cover `doctor` or
-`--dry-run` — both are verified manually against the real backends whenever they change (see
+without spawning). 56/56 passing as of the last run. Since the 2026-09-02 GLM-5.3 fixes the
+tail sections also cover, hermetically (a fake `agy` shimmed onto PATH, direct lock-module
+harnesses, and PATH-stubbed binaries — no live backend needed): the reset-then-recreate
+refusal, the cancelled-resume circuit-breaker behavior, lock release ownership /
+exclusive holder write / pid reuse / stale reclaim, and `doctor`'s exit-code gate. Does not
+exercise `claude-code` (real billing per call) or `command-code` resume (disabled);
+`--dry-run` is still verified manually against the real backends whenever it changes (see
 the 2026-09-01 Review history entries below for what that's caught), not by an automated
 case in this file yet.
 
@@ -253,6 +268,45 @@ claimed exit-code regression in the new `RelayError` paths) was checked directly
 correctly flagged its own uncertainty (its sandbox blocked `git` access) rather than
 asserting it, which is why it was checked rather than trusted or dismissed outright. Full
 brief in `docs/cli-continues-cherrypick-brief.md`.
+
+**GLM-5.3 adversarial audit fixes (2026-09-02).** A fresh GLM-5.3 session audited the
+merged result against `main` at 1.0.2 (full brief in `docs/glm53-fix-brief.md`); every
+finding was re-verified against the actual source before fixing, in this project's
+usual audit → fix → adversarial re-check rhythm. Three must-fix races: (1)
+`reset`-then-recreate mid-run corrupted the session map — if thread A was mid-run and
+someone ran `cli-relay reset t` then a quick recreate that completed first, A's critical
+section 2 would find the *replacement* session and unconditionally overwrite its
+`native_session_id`, cross-wiring a codex id onto an agy-backend thread (or vice versa),
+or silently discarding the newer id for an older one — CS2 and the fresh-failure branch
+now verify the map entry is still the *same session instance* CS1 snapshotted (backend +
+pre-run native id + CS1's run-start timestamp) and warn-and-refuse on mismatch, the same
+pattern the thread-deleted race already used; (2) lock release never verified the
+releaser still owned the lock — a holder suspended past `LOCK_STALE_MS` (laptop sleep,
+VM pause) could wake and `rm` its *successor's* lock directory, admitting a third
+entrant — release now mirrors `reclaim()`'s rename-verify-restore pattern; (3) the
+`mkdir` → `holder.json` write gap wasn't safely closed — a suspension longer than
+`LOCK_TIMEOUT_MS` between the two calls let the original holder's plain write clobber
+the successor's `holder.json`, producing two holders — the write is now an exclusive
+(`'wx'`) create whose EEXIST falls back to the waiter path, with the mkdir-EEXIST and
+write-EEXIST error paths split. Lower severity: a Ctrl-C'd (or timeout-killed) resume no
+longer counts toward the 3-strikes circuit breaker — a cancelled run is neither success
+nor failure, so the counter is left untouched (three interrupted resumes on a healthy
+thread previously auto-unconfirmed it); a stale holder record bearing the *next
+invocation's own reused pid* is now reclaimed instead of being waited on until the lock
+times out (pid reuse by an unrelated process still self-heals via the timestamp path);
+`tests/smoke.sh`'s `rm -f` on the lock directory — a silent no-op on directories — is
+now `rm -rf`; `doctor` exits 1 only when no backend at all is usable (a partial install —
+the README-documented normal setup — still exits 0) so it works as a CI gate; and pin
+text containing the literal `[END PINNED FACTS]` or a carriage return is rejected, so a
+pin can no longer forge the pinned-block boundary.
+Deliberately left as-is, with reasoning: the documented `--dry-run` token-stripping
+limitation (any fix changes flag-position CLI parsing behavior, and the audience is
+agents, not free-text discussion of flags); `.js` user adapters still load, now
+explicitly documented as CommonJS unless a `~/.cli-relay/package.json` says otherwise
+(chosen over dropping `.js` support — less disruptive for existing working CommonJS
+adapters); and the Windows process-group-kill gap is now a documented known gap rather
+than a guess-fix. The smoke suite grew hermetic fake-backend, lock-module, and doctor
+harness sections alongside the live-backend cases.
 
 ## Field notes from real use
 
@@ -376,6 +430,13 @@ guessing at intent, the same trap this whole project has avoided everywhere else
   finished), so the thread doesn't self-heal via lock staleness — it stays stuck until
   `LOCK_STALE_MS` (~21 min) passes on the *next* invocation against that thread. Narrow
   window, real gap; not closed here.
+- **Windows process-group cleanup is POSIX-only (documented 2026-09-02, not fixed).**
+  `package.json` declares no `os` restriction, but the wrapper's child termination —
+  `process.kill(-pgid, ...)` for Ctrl-C and the spawn timeout — no-ops on Windows, so a
+  backend child there would survive a router-initiated kill. A real fix needs
+  `taskkill /T /F` and a Windows box to verify against; this repo's test, dev, and
+  publish history is entirely macOS/Linux, so it's flagged here rather than
+  guess-fixed.
 - `doctor`'s `which`/`where` child processes aren't tracked by the SIGINT handler — a Ctrl-C
   during `doctor` reports "nothing spawned yet" even though those children are briefly alive.
   Low severity (`which` exits in milliseconds).

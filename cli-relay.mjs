@@ -13,7 +13,8 @@
  *
  * Exit codes:
  *   0  success
- *   1  general error or backend spawn failure
+ *   1  general error or backend spawn failure (also `doctor`, when no backend at
+ *      all is usable — a partial install is the normal setup and still exits 0)
  *   2  usage error
  *   3  backend produced an id/exit-0-shaped result but no usable answer
  */
@@ -200,6 +201,20 @@ function assertNotInFlight(session, thread) {
   );
 }
 
+// CS1 snapshots the exact session instance it marks running. CS2 (and the fresh-failure
+// branch below) must verify the map entry is still that same instance before recording
+// an outcome: a `reset` mid-run followed by a recreate on the same thread name leaves a
+// *different* session under that name, and recording onto it would cross-wire a native
+// session id across backends (a codex id on an agy-backend thread, or vice versa) or
+// silently discard the replacement's newer id (found in the GLM-5.3 audit). Backend plus
+// the pre-run native id plus CS1's own run-start timestamp identify the instance; on
+// mismatch, warn and refuse to record — the same pattern the thread-deleted case uses.
+function isSameSessionInstance(session, record) {
+  return session.backend === record.backend &&
+    session.native_session_id === record.native_session_id &&
+    session.run_started_iso === record.run_started_iso;
+}
+
 async function main() {
   const cliArgs = process.argv.slice(2);
 
@@ -210,8 +225,8 @@ async function main() {
   const { loadAdapters } = await import('./src/adapter-loader.mjs');
   const adapters = await loadAdapters();
   if (cliArgs[0] === 'doctor') {
-    await cmdDoctor(adapters);
-    process.exit(0);
+    const anyBackendUsable = await cmdDoctor(adapters);
+    process.exit(anyBackendUsable ? 0 : 1);
   }
 
   const dryRun = cliArgs.includes('--dry-run') || cliArgs.includes('--print-command');
@@ -331,6 +346,17 @@ async function main() {
         );
         return;
       }
+      if (!isSameSessionInstance(session, record)) {
+        // Reset-then-recreate mid-run: the map entry is now a different session
+        // instance (possibly on a different backend). Don't cross-wire this run's
+        // outcome onto it.
+        console.error(
+          `warning: thread "${thread}" in ${MAP_PATH} is no longer the session this run ` +
+          `started from (it was reset or replaced while this run was in flight) — ` +
+          'outcome not recorded.',
+        );
+        return;
+      }
       session.status = 'ready';
       session.last_run_iso = new Date().toISOString();
       session.last_exit_code = code;
@@ -369,22 +395,40 @@ async function main() {
       );
       return;
     }
+    if (!isSameSessionInstance(session, record)) {
+      // Reset-then-recreate mid-run: the map entry is now a different session
+      // instance (possibly on a different backend). Don't cross-wire this run's
+      // native id onto it or discard its newer id in favor of this run's.
+      console.error(
+        `warning: thread "${thread}" in ${MAP_PATH} is no longer the session this run ` +
+        `started from (it was reset or replaced while this run was in flight) — outcome` +
+        `${newId ? ` (including native id ${newId})` : ''} not recorded.`,
+      );
+      return;
+    }
     if (newId) {
       session.native_session_id = newId;
       session.confirmed = true;
       session.consecutive_resume_failures = 0;
     }
     if (mode === 'resume') {
-      if (parsed.answer) {
-        session.consecutive_resume_failures = 0;
-      } else {
-        session.consecutive_resume_failures = (session.consecutive_resume_failures ?? 0) + 1;
-        if (session.confirmed &&
-            session.consecutive_resume_failures >= RESUME_FAILURE_THRESHOLD) {
-          session.confirmed = false;
-          autoUnconfirmed = true;
+      if (!cancelled) {
+        if (parsed.answer) {
+          session.consecutive_resume_failures = 0;
+        } else {
+          session.consecutive_resume_failures = (session.consecutive_resume_failures ?? 0) + 1;
+          if (session.confirmed &&
+              session.consecutive_resume_failures >= RESUME_FAILURE_THRESHOLD) {
+            session.confirmed = false;
+            autoUnconfirmed = true;
+          }
         }
       }
+      // A run the wrapper cancelled (Ctrl-C, SIGTERM, or the spawn timeout) says
+      // nothing about the backend's resume health — neither success nor failure.
+      // The failure counter is deliberately left untouched: three interrupted
+      // resumes on a perfectly healthy thread must not auto-unconfirm it (found
+      // in the GLM-5.3 audit).
       resumeFailureCount = session.consecutive_resume_failures;
     }
     session.status = 'ready';
