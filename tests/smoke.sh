@@ -28,18 +28,32 @@ if ! MAP=$(node --input-type=module -e '
   exit 1
 fi
 [ -n "$MAP" ] || { echo "configured cli-relay session map is empty" >&2; exit 1; }
+if ! LEDGER=$(node --input-type=module -e '
+  import { pathToFileURL } from "node:url";
+  const { LEDGER_PATH } = await import(pathToFileURL(process.argv[1]).href);
+  process.stdout.write(LEDGER_PATH);
+' "$CONFIG_MODULE"); then
+  echo "failed to resolve configured cli-relay governance ledger" >&2
+  exit 1
+fi
+[ -n "$LEDGER" ] || { echo "configured cli-relay governance ledger is empty" >&2; exit 1; }
 BACKUP="$MAP.smoke-backup.$$"
+LEDGER_BACKUP="$LEDGER.smoke-backup.$$"
 PASS=0
 FAIL=0
 
 restore_map() {
   rm -rf "$MAP" "$MAP.lock"
+  rm -f "$LEDGER"
   [ -f "$BACKUP" ] && mv "$BACKUP" "$MAP"
+  [ -f "$LEDGER_BACKUP" ] && mv "$LEDGER_BACKUP" "$LEDGER"
 }
 trap restore_map EXIT
 
 [ -f "$MAP" ] && cp "$MAP" "$BACKUP"
+[ -f "$LEDGER" ] && cp "$LEDGER" "$LEDGER_BACKUP"
 rm -rf "$MAP" "$MAP.lock"
+rm -f "$LEDGER"
 
 check() {
   local desc="$1" expected_code="$2" actual_code="$3"
@@ -794,6 +808,396 @@ payload = json.load(open(sys.argv[1]))
 assert payload['answer'] == 'complete answer' and payload['native_session_id'] == 'collection-id', payload
 STDERR_LIMIT_CHECK
 check "stderr chatter preserves the successful stdout result" 0 "$?"
+
+echo
+echo "== governance ledger and escalation tier gate (hermetic, isolated HOME) =="
+cat > "$WORK/governance-ledger-worker.mjs" << 'GOVERNANCE_LEDGER_WORKER'
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const [root, index] = process.argv.slice(2);
+const { appendLedgerEntry } = await import(
+  pathToFileURL(join(root, 'src/governance/ledger.mjs')).href
+);
+await appendLedgerEntry({
+  backend: 'agy',
+  thread: `concurrent-${index}`,
+  mode: Number(index) % 2 === 0 ? 'fresh' : 'resume',
+  outcome: 'confirmed',
+  exit_code: 0,
+  tier: 1,
+  tier_name: 'read-only',
+  gate_allowed: true,
+  operator: `worker-${index}`,
+});
+GOVERNANCE_LEDGER_WORKER
+
+cat > "$WORK/governance-harness.mjs" << 'GOVERNANCE_HARNESS'
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import {
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
+} from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
+
+const [route, work, worker] = process.argv.slice(2);
+const root = dirname(route);
+const fakeBin = join(work, 'governance-bin');
+mkdirSync(fakeBin, { recursive: true });
+writeFileSync(join(fakeBin, 'agy'), `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { join } = require('node:path');
+const args = process.argv.slice(2);
+appendFileSync(join(process.env.HOME, 'backend-spawns.log'), JSON.stringify(args) + '\\n');
+const conversation = args.indexOf('--conversation');
+const id = conversation >= 0 ? args[conversation + 1] : 'governance-session-' + process.pid;
+process.stdout.write(JSON.stringify({ conversation_id: id, response: 'ok' }) + '\\n');
+`, { mode: 0o755 });
+
+function homeFor(name) {
+  const home = join(work, `governance-home-${name}`);
+  const state = join(home, '.cli-relay');
+  mkdirSync(state, { recursive: true });
+  return {
+    home,
+    state,
+    map: join(state, 'sessions.json'),
+    ledger: join(state, 'ledger.jsonl'),
+    gateConfig: join(state, 'governance', 'tier-gate.json'),
+    spawnLog: join(home, 'backend-spawns.log'),
+  };
+}
+
+function childEnv(home) {
+  return {
+    ...process.env,
+    HOME: home,
+    PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ''}`,
+  };
+}
+
+function capture(child) {
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+}
+
+function runCli(paths, args) {
+  return capture(spawn(process.execPath, [route, ...args], {
+    env: childEnv(paths.home),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }));
+}
+
+function runWorker(paths, index) {
+  return capture(spawn(process.execPath, [worker, root, String(index)], {
+    env: childEnv(paths.home),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }));
+}
+
+function expectCode(result, expected, label) {
+  assert.equal(
+    result.code,
+    expected,
+    `${label}: exit ${result.code}/${result.signal}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+}
+
+function ledgerEntries(paths) {
+  if (!existsSync(paths.ledger)) return [];
+  const contents = readFileSync(paths.ledger, 'utf8').trim();
+  return contents ? contents.split('\n').map((line) => JSON.parse(line)) : [];
+}
+
+function spawnCount(paths) {
+  if (!existsSync(paths.spawnLog)) return 0;
+  return readFileSync(paths.spawnLog, 'utf8').trim().split('\n').filter(Boolean).length;
+}
+
+function assertDispatch(entry, expected) {
+  assert.equal(entry.version, 1);
+  assert.equal(entry.type, 'dispatch');
+  assert.ok(Number.isFinite(Date.parse(entry.timestamp)), `invalid timestamp: ${entry.timestamp}`);
+  for (const [key, value] of Object.entries(expected)) assert.deepEqual(entry[key], value, key);
+  assert.equal(entry.client, null);
+  assert.equal(entry.task, null);
+  if (!Object.hasOwn(expected, 'operator')) assert.equal(entry.operator, null);
+  assert.match(entry.hash, /^[0-9a-f]{64}$/);
+}
+
+function assertIntactReport(report, totalEntries) {
+  assert.deepEqual(report, {
+    totalEntries,
+    intact: true,
+    breakIndex: null,
+    lineNumber: null,
+    reason: null,
+  });
+}
+
+// Fresh and resume each append one linked entry. The first entry is explicitly
+// genesis-linked, and audit verify exposes the stable structured report.
+{
+  const paths = homeFor('roundtrip');
+  const fresh = await runCli(paths, ['agy', 'ledger-thread', 'fresh', 'first']);
+  expectCode(fresh, 0, 'untagged fresh');
+  assert.equal(JSON.parse(fresh.stdout).answer, 'ok');
+  assert.equal(fresh.stderr, '');
+  const resume = await runCli(paths, ['agy', 'ledger-thread', 'resume', 'second']);
+  expectCode(resume, 0, 'untagged resume');
+  assert.equal(JSON.parse(resume.stdout).answer, 'ok');
+
+  let entries = ledgerEntries(paths);
+  assert.equal(entries.length, 2);
+  assertDispatch(entries[0], {
+    backend: 'agy', thread: 'ledger-thread', mode: 'fresh', outcome: 'confirmed',
+    exit_code: 0, tier: 1, tier_name: 'read-only', gate_allowed: true,
+    previous_hash: 'GENESIS',
+  });
+  assertDispatch(entries[1], {
+    backend: 'agy', thread: 'ledger-thread', mode: 'resume', outcome: 'confirmed',
+    exit_code: 0, tier: 1, tier_name: 'read-only', gate_allowed: true,
+    previous_hash: entries[0].hash,
+  });
+  const verified = await runCli(paths, ['audit', 'verify']);
+  expectCode(verified, 0, 'intact audit');
+  assertIntactReport(JSON.parse(verified.stdout), 2);
+
+  // Corrupt an already-written field without changing its stored hash. Verification
+  // reports the exact line but remains callable, and damage does not gate a later append.
+  entries[0].thread = 'tampered-thread';
+  writeFileSync(paths.ledger, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
+  const broken = await runCli(paths, ['audit', 'verify']);
+  expectCode(broken, 1, 'corrupt audit');
+  const brokenReport = JSON.parse(broken.stdout);
+  assert.equal(brokenReport.totalEntries, 2);
+  assert.equal(brokenReport.intact, false);
+  assert.equal(brokenReport.breakIndex, 0);
+  assert.equal(brokenReport.lineNumber, 1);
+  assert.match(brokenReport.reason, /^hash mismatch:/);
+  assert.doesNotMatch(broken.stderr, /SyntaxError|at file:/);
+
+  const afterDamage = await runCli(paths, ['agy', 'after-corruption', 'fresh', 'continue']);
+  expectCode(afterDamage, 0, 'append after corruption');
+  entries = ledgerEntries(paths);
+  assert.equal(entries.length, 3);
+  assert.equal(entries[2].previous_hash, entries[1].hash);
+  const stillBroken = await runCli(paths, ['audit', 'verify']);
+  expectCode(stillBroken, 1, 'audit after subsequent append');
+  const laterReport = JSON.parse(stillBroken.stdout);
+  assert.equal(laterReport.totalEntries, 3);
+  assert.equal(laterReport.breakIndex, 0);
+  assert.equal(laterReport.lineNumber, 1);
+}
+
+// The ledger's withLock call must serialize independent OS processes, not merely
+// promises in one runtime. Count and uniqueness catch swallowed/lost appends.
+{
+  const paths = homeFor('concurrent');
+  const results = await Promise.all(
+    Array.from({ length: 32 }, (_, index) => runWorker(paths, index)),
+  );
+  results.forEach((result, index) => expectCode(result, 0, `ledger worker ${index}`));
+  const entries = ledgerEntries(paths);
+  assert.equal(entries.length, 32);
+  assert.equal(new Set(entries.map((entry) => entry.thread)).size, 32);
+  assert.equal(entries[0].previous_hash, 'GENESIS');
+  entries.slice(1).forEach((entry, index) => {
+    assert.equal(entry.previous_hash, entries[index].hash);
+  });
+  const verified = await runCli(paths, ['audit', 'verify']);
+  expectCode(verified, 0, 'concurrent ledger audit');
+  assertIntactReport(JSON.parse(verified.stdout), 32);
+}
+
+// Untagged calls remain tier 1. Tier 3 and 4 refusals happen before spawn but are
+// themselves recorded; confirmation permits the otherwise-identical dispatch.
+{
+  const paths = homeFor('tiers');
+  const defaultTier = await runCli(paths, ['agy', 'tier-default', 'fresh', 'default']);
+  expectCode(defaultTier, 0, 'default tier');
+  assert.equal(spawnCount(paths), 1);
+  const localTier = await runCli(
+    paths,
+    ['agy', 'tier-local', 'fresh', 'local', '--tier=local'],
+  );
+  expectCode(localTier, 0, 'named tier 2');
+  assert.equal(spawnCount(paths), 2);
+
+  const tier3Refused = await runCli(
+    paths,
+    ['agy', 'tier-three-refused', 'fresh', 'refuse', '--tier', '3'],
+  );
+  expectCode(tier3Refused, 1, 'tier 3 without confirmation');
+  assert.equal(tier3Refused.stdout, '');
+  assert.match(tier3Refused.stderr, /cli-relay error:.*requires an explicit --confirm/);
+  assert.equal(spawnCount(paths), 2);
+
+  const tier4Refused = await runCli(
+    paths,
+    ['--tier=irreversible', 'agy', 'tier-four-refused', 'fresh', 'refuse'],
+  );
+  expectCode(tier4Refused, 1, 'tier 4 without confirmation');
+  assert.match(tier4Refused.stderr, /requires an explicit --confirm/);
+  assert.equal(spawnCount(paths), 2);
+
+  const tier3Allowed = await runCli(
+    paths,
+    ['--confirm', 'agy', 'tier-three-allowed', 'fresh', 'allow', '--tier', '3'],
+  );
+  expectCode(tier3Allowed, 0, 'confirmed tier 3');
+  const tier4Allowed = await runCli(
+    paths,
+    ['agy', 'tier-four-allowed', 'fresh', 'allow', '--tier=irreversible', '--confirm'],
+  );
+  expectCode(tier4Allowed, 0, 'confirmed tier 4');
+  assert.equal(spawnCount(paths), 4);
+
+  const entries = ledgerEntries(paths);
+  assert.equal(entries.length, 6);
+  const expected = [
+    ['tier-default', 1, 'read-only', true, 'confirmed', 0],
+    ['tier-local', 2, 'local', true, 'confirmed', 0],
+    ['tier-three-refused', 3, 'reversible-remote', false, 'failed', 1],
+    ['tier-four-refused', 4, 'irreversible', false, 'failed', 1],
+    ['tier-three-allowed', 3, 'reversible-remote', true, 'confirmed', 0],
+    ['tier-four-allowed', 4, 'irreversible', true, 'confirmed', 0],
+  ];
+  entries.forEach((entry, index) => {
+    const [thread, tier, tierName, gateAllowed, outcome, exitCode] = expected[index];
+    assertDispatch(entry, {
+      backend: 'agy', thread, mode: 'fresh', outcome, exit_code: exitCode,
+      tier, tier_name: tierName, gate_allowed: gateAllowed,
+      previous_hash: index === 0 ? 'GENESIS' : entries[index - 1].hash,
+    });
+  });
+  const sessions = JSON.parse(readFileSync(paths.map, 'utf8')).sessions;
+  assert.equal(sessions['tier-three-refused'], undefined);
+  assert.equal(sessions['tier-four-refused'], undefined);
+
+  // Preview remains side-effect-free, strips the new governance flags from backend
+  // argv, and enforces the same high-tier refusal as a real dispatch.
+  const ledgerCount = entries.length;
+  const preview = await runCli(
+    paths,
+    ['--dry-run', '--tier=read-only', 'agy', 'preview-one', 'fresh', 'preview'],
+  );
+  expectCode(preview, 0, 'tiered dry run');
+  const previewArgv = JSON.parse(preview.stdout);
+  assert.equal(previewArgv[0], 'agy');
+  assert.ok(!previewArgv.includes('--tier=read-only'));
+  assert.ok(!previewArgv.includes('--confirm'));
+  const refusedPreview = await runCli(
+    paths,
+    ['agy', 'preview-two', 'fresh', 'preview', '--tier=3', '--dry-run'],
+  );
+  expectCode(refusedPreview, 1, 'unconfirmed tier 3 dry run');
+  const allowedPreview = await runCli(
+    paths,
+    ['--print-command', 'agy', 'preview-three', 'fresh', 'preview', '--tier', '3', '--confirm'],
+  );
+  expectCode(allowedPreview, 0, 'confirmed tier 3 print-command');
+  assert.equal(spawnCount(paths), 4);
+  assert.equal(ledgerEntries(paths).length, ledgerCount);
+  const sessionsAfterPreview = JSON.parse(readFileSync(paths.map, 'utf8')).sessions;
+  assert.ok(!Object.keys(sessionsAfterPreview).some((thread) => thread.startsWith('preview-')));
+
+  const invalidTier = await runCli(
+    paths,
+    ['agy', 'tier-invalid', 'fresh', 'invalid', '--tier=5'],
+  );
+  expectCode(invalidTier, 2, 'invalid tier value');
+  assert.match(invalidTier.stderr, /invalid tier/);
+  const missingTier = await runCli(
+    paths,
+    ['agy', 'tier-missing', 'fresh', 'invalid', '--tier'],
+  );
+  expectCode(missingTier, 2, 'missing tier value');
+  assert.match(missingTier.stderr, /--tier requires/);
+  assert.equal(spawnCount(paths), 4);
+  assert.equal(ledgerEntries(paths).length, ledgerCount);
+}
+
+// This policy owns malformed optional config. The warning is scoped to the tier gate,
+// housekeeping remains available, and fallback retains the tier 3/4 protection.
+{
+  const paths = homeFor('malformed-gate');
+  mkdirSync(dirname(paths.gateConfig), { recursive: true });
+  writeFileSync(paths.gateConfig, '{not valid JSON\n');
+  const listed = await runCli(paths, ['list']);
+  expectCode(listed, 0, 'list with malformed tier config');
+  assert.match(listed.stdout, /no threads recorded/);
+  assert.equal(listed.stderr, '');
+  const emptyAudit = await runCli(paths, ['audit', 'verify']);
+  expectCode(emptyAudit, 0, 'audit with malformed tier config');
+  assertIntactReport(JSON.parse(emptyAudit.stdout), 0);
+  assert.equal(emptyAudit.stderr, '');
+
+  const defaultTier = await runCli(paths, ['agy', 'malformed-default', 'fresh', 'safe']);
+  expectCode(defaultTier, 0, 'default dispatch with malformed tier config');
+  assert.match(defaultTier.stderr, /warning: tier-gate config failed to load/);
+  assert.doesNotMatch(defaultTier.stderr, /governance ledger|adapter .*failed/);
+  const refused = await runCli(
+    paths,
+    ['agy', 'malformed-tier-three', 'fresh', 'safe', '--tier=3'],
+  );
+  expectCode(refused, 1, 'tier 3 fallback with malformed config');
+  assert.match(refused.stderr, /warning: tier-gate config failed to load/);
+  assert.match(refused.stderr, /requires an explicit --confirm/);
+  assert.equal(spawnCount(paths), 1);
+  const finalAudit = await runCli(paths, ['audit', 'verify']);
+  expectCode(finalAudit, 0, 'ledger after malformed tier config');
+  assertIntactReport(JSON.parse(finalAudit.stdout), 2);
+}
+
+// A ledger filesystem failure is advisory. It must not change a successful backend
+// result or leave the normal session outcome uncommitted.
+{
+  const paths = homeFor('ledger-write-failure');
+  mkdirSync(paths.ledger);
+  const result = await runCli(paths, ['agy', 'ledger-write-failure', 'fresh', 'continue']);
+  expectCode(result, 0, 'dispatch when ledger path is unwritable as a file');
+  assert.equal(JSON.parse(result.stdout).answer, 'ok');
+  assert.match(result.stderr, /warning: governance ledger .*append failed/);
+  assert.doesNotMatch(result.stderr, /cli-relay error:/);
+  assert.equal(spawnCount(paths), 1);
+  const session = JSON.parse(readFileSync(paths.map, 'utf8')).sessions['ledger-write-failure'];
+  assert.equal(session.confirmed, true);
+  assert.equal(session.status, 'ready');
+}
+
+// A malformed ledger-only path override is contained by the ledger module too:
+// shared config and ordinary commands still load, while append/verify visibly use
+// the safe default path instead of denying the backend call.
+{
+  const paths = homeFor('malformed-ledger-path');
+  writeFileSync(join(paths.state, 'config.json'), JSON.stringify({ LEDGER_PATH: [] }));
+  const listed = await runCli(paths, ['list']);
+  expectCode(listed, 0, 'list with malformed ledger path config');
+  assert.equal(listed.stderr, '');
+  const result = await runCli(paths, ['agy', 'malformed-ledger-path', 'fresh', 'continue']);
+  expectCode(result, 0, 'dispatch with malformed ledger path config');
+  assert.equal(JSON.parse(result.stdout).answer, 'ok');
+  assert.match(result.stderr, /warning: governance ledger .*LEDGER_PATH.*using/);
+  assert.equal(ledgerEntries(paths).length, 1);
+  const verified = await runCli(paths, ['audit', 'verify']);
+  expectCode(verified, 0, 'audit with malformed ledger path config');
+  assertIntactReport(JSON.parse(verified.stdout), 1);
+  assert.match(verified.stderr, /warning: governance ledger .*LEDGER_PATH.*fallback path/);
+}
+
+console.log('PASS: governance ledger roundtrip, corruption recovery, concurrency, tier gate, isolation');
+GOVERNANCE_HARNESS
+
+governance_out=$(node "$WORK/governance-harness.mjs" "$ROUTE" "$WORK" "$WORK/governance-ledger-worker.mjs" 2>&1); governance_code=$?
+check "governance ledger + tier gate hermetic regression coverage" 0 "$governance_code"
+[ -n "$governance_out" ] && echo "$governance_out"
 
 rm -rf "$FAKE_DIR" "$WORK"
 

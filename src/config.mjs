@@ -10,6 +10,7 @@ export const MAP_VERSION = 1;
 
 export const DEFAULTS = Object.freeze({
   MAP_PATH: join(STATE_DIR, 'sessions.json'),
+  LEDGER_PATH: join(STATE_DIR, 'ledger.jsonl'),
   USER_ADAPTERS_DIR: join(STATE_DIR, 'adapters'),
   SPAWN_TIMEOUT_MS: 20 * 60_000,
   SPAWN_KILL_GRACE_MS: 3_000,
@@ -54,6 +55,12 @@ function loadConfig() {
     }
     merged[name] = expandHome(merged[name]);
   }
+  // Governance modules own their optional configuration failures. Keep a bad
+  // ledger override out of the fatal shared-config path so auditing can warn and
+  // fall back without taking down unrelated commands or a backend dispatch.
+  if (typeof merged.LEDGER_PATH === 'string' && merged.LEDGER_PATH) {
+    merged.LEDGER_PATH = expandHome(merged.LEDGER_PATH);
+  }
   for (const name of Object.keys(DEFAULTS).filter((key) => typeof DEFAULTS[key] === 'number')) {
     if (!Number.isFinite(merged[name]) || merged[name] < 0) {
       throw new Error(`${CONFIG_PATH}: ${name} must be a non-negative number`);
@@ -77,6 +84,14 @@ export const {
   PIN_WARNING_THRESHOLD,
   MAX_PIN_LENGTH,
 } = CONFIG;
+
+export const LEDGER_PATH_CONFIG_ERROR =
+  typeof CONFIG.LEDGER_PATH === 'string' && CONFIG.LEDGER_PATH
+    ? null
+    : `${CONFIG_PATH}: LEDGER_PATH must be a non-empty string`;
+export const LEDGER_PATH = LEDGER_PATH_CONFIG_ERROR
+  ? DEFAULTS.LEDGER_PATH
+  : CONFIG.LEDGER_PATH;
 
 // These must follow the configured base values. They are intentionally not independently
 // configurable, so a map or timeout override cannot leave its related safety value behind.

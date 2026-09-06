@@ -49,9 +49,10 @@ installing any of them confirms cli-relay can see it):
 ## Usage
 
 ```
-cli-relay [--dry-run|--print-command] <backend> <thread> <fresh|resume> <prompt...>
+cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
 cli-relay list
 cli-relay doctor
+cli-relay audit verify
 cli-relay reset <thread>
 cli-relay pin <thread> "<fact>"
 cli-relay unpin <thread> <index>
@@ -75,6 +76,17 @@ that would be spawned (prompt fully assembled, pins injected) without spawning a
 touching the session map at all — it enforces the same refusals a real run would (e.g. won't
 preview a `resume` on an unconfirmed thread, won't preview against a thread with a run
 already in flight), so what it shows is genuinely what would happen, not a best-effort guess.
+
+Dispatches default to tier 1 (`read-only`). `--tier` also accepts `local` (2),
+`reversible-remote` (3), and `irreversible` (4), using either `--tier <value>` or
+`--tier=<value>`. Tiers 3 and 4 require `--confirm`; otherwise cli-relay refuses before
+spawning the backend. `--dry-run` enforces the same gate but remains a state-free preview.
+
+Every real dispatch attempt is recorded in a SHA-256 hash-chained JSON Lines ledger. Run
+`cli-relay audit verify` to check it on demand; the command exits 0 for an intact chain and
+1 with the exact first broken entry for a corrupt chain. Verification is deliberately never
+performed while appending, so old corruption cannot block a new backend call or the diagnostic
+command itself.
 
 Not named `route` — that collides with the pre-existing BSD `/sbin/route` network tool,
 found the hard way (see Known gaps history below).
@@ -104,7 +116,14 @@ Runtime settings come from built-in defaults merged with optional overrides in
 `~/.cli-relay/config.json`. Keys may use the exported uppercase names or camelCase, for
 example `SPAWN_TIMEOUT_MS` or `spawnTimeoutMs`. Available settings are defined in
 `src/config.mjs`; derived values such as the lock path and stale-lock window always follow
-their configured base values.
+their configured base values. The session map and governance ledger paths are independently
+configurable as `MAP_PATH` and `LEDGER_PATH`.
+
+The tier gate has an isolated optional config at
+`~/.cli-relay/governance/tier-gate.json`. The supported override is a version-1 object with
+`confirmationRequiredTiers` set to `[3, 4]`. A missing file uses the built-in policy silently.
+A malformed file emits a scoped warning and falls back to that same safe policy; it does not
+affect housekeeping, adapters, ledger verification, or other future governance modules.
 
 Built-in adapters live in `src/adapters/` and are discovered at runtime. Additional `.mjs`,
 `.js`, or `.cjs` adapters can be placed in `~/.cli-relay/adapters/`; an adapter with the same
@@ -144,7 +163,12 @@ lives under `src/`:
   asymmetry where a usage error (exit 2) prints with no `cli-relay error:` prefix while
   everything else (exit 1) does; that split existed before `RelayError` did and is
   intentional, not something to "fix" into consistency.
-- `src/commands/` — `list`/`reset`/`pin`/`unpin`/`pins`/`doctor`, one file each.
+- `src/commands/` — `list`/`reset`/`pin`/`unpin`/`pins`/`doctor`/`audit`, one file each.
+- `src/governance/ledger.mjs` — best-effort append-only dispatch ledger plus explicit,
+  read-time integrity verification. There is no automatic retention cap; verification already
+  recognizes explicit checkpoint records as valid new anchors so a future retention policy
+  cannot silently slice away chain history.
+- `src/governance/tier-gate.mjs` — independently loaded escalation-tier policy.
 - `src/adapter-loader.mjs` — discovery, validation, and the `assertAdapterRegistry`
   completeness check described above.
 - `src/adapters/` — one file per backend.

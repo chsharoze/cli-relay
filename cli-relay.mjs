@@ -3,9 +3,11 @@
  * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   cli-relay [--dry-run|--print-command] <backend> <thread> <fresh|resume> <prompt...>
+ *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--confirm]
+ *     <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
+ *   cli-relay audit verify
  *   cli-relay reset <thread>
  *   cli-relay pin <thread> "<fact>"
  *   cli-relay unpin <thread> <index>
@@ -21,6 +23,7 @@
 
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { cmdAuditVerify } from './src/commands/audit.mjs';
 import { cmdDoctor } from './src/commands/doctor.mjs';
 import { cmdList } from './src/commands/list.mjs';
 import { cmdPin } from './src/commands/pin.mjs';
@@ -41,6 +44,7 @@ import { withLock } from './src/core/lock.mjs';
 import { loadMap, saveMap } from './src/core/map-store.mjs';
 import { buildPinnedBlock } from './src/core/pins.mjs';
 import { withThreadSuggestions } from './src/core/thread-lookup.mjs';
+import { appendLedgerEntry } from './src/governance/ledger.mjs';
 
 let activeChildPgid = null;
 let terminateActiveChild = null;
@@ -159,6 +163,16 @@ function runChild(argv, env) {
 }
 
 async function runHousekeeping(cliArgs) {
+  if (cliArgs[0] === 'audit') {
+    if (cliArgs.length !== 2 || cliArgs[1] !== 'verify') {
+      console.error('usage: cli-relay audit verify');
+      process.exitCode = 2;
+      return true;
+    }
+    const report = cmdAuditVerify();
+    process.exitCode = report.intact ? 0 : 1;
+    return true;
+  }
   if (cliArgs[0] === 'list') {
     cmdList();
     return true;
@@ -184,16 +198,64 @@ async function runHousekeeping(cliArgs) {
 
 function printUsage(backends) {
   console.error(
-    'usage: cli-relay [--dry-run|--print-command] ' +
+    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--confirm] ' +
     '<backend> <thread> <fresh|resume> <prompt...>',
   );
   console.error('       cli-relay list');
   console.error('       cli-relay doctor');
+  console.error('       cli-relay audit verify');
   console.error('       cli-relay reset <thread>');
   console.error('       cli-relay pin <thread> "<fact>"');
   console.error('       cli-relay unpin <thread> <index>');
   console.error('       cli-relay pins <thread>');
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
+}
+
+function parseDispatchFlags(cliArgs) {
+  let dryRun = false;
+  let confirm = false;
+  let tierValue;
+  let tierSeen = false;
+  const routingArgs = [];
+
+  for (let index = 0; index < cliArgs.length; index += 1) {
+    const argument = cliArgs[index];
+    if (argument === '--dry-run' || argument === '--print-command') {
+      dryRun = true;
+      continue;
+    }
+    if (argument === '--confirm') {
+      confirm = true;
+      continue;
+    }
+    if (argument === '--tier' || argument.startsWith('--tier=')) {
+      if (tierSeen) {
+        throw new RelayError(
+          'INVALID_TIER',
+          '--tier may be provided only once',
+          { exitCode: 2 },
+        );
+      }
+      tierSeen = true;
+      if (argument === '--tier') {
+        tierValue = cliArgs[index + 1];
+        if (tierValue == null || tierValue.startsWith('--')) {
+          throw new RelayError(
+            'INVALID_TIER',
+            '--tier requires one of: 1, 2, 3, 4, read-only, local, ' +
+            'reversible-remote, irreversible',
+            { exitCode: 2 },
+          );
+        }
+        index += 1;
+      } else {
+        tierValue = argument.slice('--tier='.length);
+      }
+      continue;
+    }
+    routingArgs.push(argument);
+  }
+  return { dryRun, confirm, tierValue, routingArgs };
 }
 
 function sessionForInvocation(map, backend, thread, mode, adapter) {
@@ -278,10 +340,9 @@ async function main() {
     return;
   }
 
-  const dryRun = cliArgs.includes('--dry-run') || cliArgs.includes('--print-command');
-  const routingArgs = cliArgs.filter(
-    (argument) => argument !== '--dry-run' && argument !== '--print-command',
-  );
+  const {
+    dryRun, confirm, tierValue, routingArgs,
+  } = parseDispatchFlags(cliArgs);
   const [backend, thread, mode, ...rest] = routingArgs;
   const prompt = rest.join(' ');
 
@@ -306,6 +367,38 @@ async function main() {
     );
   }
 
+  // Tier policy is loaded only for dispatches. Its optional config loader owns
+  // its own failures, so it cannot take down housekeeping, adapter diagnostics,
+  // or the corruption-recovery path in `audit verify`.
+  const { loadTierGate, parseTier } = await import('./src/governance/tier-gate.mjs');
+  const tier = parseTier(tierValue);
+  if (!tier) {
+    throw new RelayError(
+      'INVALID_TIER',
+      `invalid tier "${tierValue}" — choose 1, 2, 3, 4, read-only, local, ` +
+      'reversible-remote, or irreversible',
+      { exitCode: 2 },
+    );
+  }
+  const gate = loadTierGate().evaluate(tier, confirm);
+  if (!gate.allowed) {
+    // A dry run is a preview, not a backend dispatch, so it enforces the same
+    // refusal without writing an event. Real refused attempts are auditable.
+    if (!dryRun) {
+      await appendLedgerEntry({
+        backend,
+        thread,
+        mode,
+        outcome: 'failed',
+        exit_code: 1,
+        tier: tier.level,
+        tier_name: tier.name,
+        gate_allowed: false,
+      });
+    }
+    throw new RelayError('TIER_CONFIRMATION_REQUIRED', gate.reason);
+  }
+
   if (dryRun) {
     const map = loadMap();
     const session = sessionForInvocation(map, backend, thread, mode, adapter);
@@ -317,6 +410,19 @@ async function main() {
     console.log(JSON.stringify(argv));
     return;
   }
+
+  const ledgerEntry = {
+    backend,
+    thread,
+    mode,
+    outcome: 'failed',
+    exit_code: 1,
+    tier: tier.level,
+    tier_name: tier.name,
+    gate_allowed: true,
+  };
+
+  try {
 
   // Critical section 1: validate and mark running before spawn.
   const record = await withLock(() => {
@@ -435,7 +541,10 @@ async function main() {
       `"${backend}" gave ${reason} on a fresh run — NOT marking confirmed.\n` +
       `stderr tail:\n${err.slice(-2000)}\nstdout tail:\n${out.slice(-1000)}`,
     );
-    process.exitCode = userInterrupted ? interruptExitCode() : (parsed.id ? 3 : 1);
+    const finalExitCode = userInterrupted ? interruptExitCode() : (parsed.id ? 3 : 1);
+    ledgerEntry.outcome = cancelled || userInterrupted ? 'cancelled' : 'failed';
+    ledgerEntry.exit_code = finalExitCode;
+    process.exitCode = finalExitCode;
     return;
   }
   if (mode === 'fresh') newId = parsed.id;
@@ -504,6 +613,16 @@ async function main() {
     saveMap(map);
   });
 
+  const finalExitCode = mode === 'resume' && !parsed.answer
+    ? (userInterrupted ? interruptExitCode() : (code === 0 ? 3 : (code ?? 1)))
+    : (userInterrupted ? interruptExitCode() : (code === null ? 1 : code));
+  ledgerEntry.outcome = cancelled || userInterrupted
+    ? 'cancelled'
+    : (finalExitCode === 0 && parsed.answer && (mode === 'resume' || newId)
+      ? 'confirmed'
+      : 'failed');
+  ledgerEntry.exit_code = finalExitCode;
+
   if (autoUnconfirmed) {
     console.error(
       `"${backend}" thread "${thread}": ${resumeFailureCount} consecutive resume failures ` +
@@ -536,12 +655,26 @@ async function main() {
       `"${backend}" resume produced no parseable answer (child exit ${code}) — ` +
       'see stdout_tail above',
     );
-    process.exitCode = userInterrupted ? interruptExitCode() : (code === 0 ? 3 : (code ?? 1));
+    process.exitCode = finalExitCode;
     return;
   }
   // Let Node drain stdout/stderr before exiting, including large JSON answers piped
   // to a slow reader. process.exit() can discard writes still queued by console.log.
-  process.exitCode = userInterrupted ? interruptExitCode() : (code === null ? 1 : code);
+  process.exitCode = finalExitCode;
+  } catch (error) {
+    if (userInterrupted) {
+      ledgerEntry.outcome = 'cancelled';
+      ledgerEntry.exit_code = interruptExitCode();
+    } else {
+      ledgerEntry.outcome = 'failed';
+      ledgerEntry.exit_code = error instanceof RelayError ? error.exitCode : 1;
+    }
+    throw error;
+  } finally {
+    // withLock is deliberately not nested: both map critical sections are over
+    // before the ledger takes the same hardened process lock.
+    await appendLedgerEntry(ledgerEntry);
+  }
 }
 
 function onSignal(signal) {
