@@ -20,6 +20,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { cmdDoctor } from './src/commands/doctor.mjs';
 import { cmdList } from './src/commands/list.mjs';
 import { cmdPin } from './src/commands/pin.mjs';
@@ -42,12 +43,40 @@ import { buildPinnedBlock } from './src/core/pins.mjs';
 import { withThreadSuggestions } from './src/core/thread-lookup.mjs';
 
 let activeChildPgid = null;
+let terminateActiveChild = null;
 let childHasFinished = false;
 let userInterrupted = false;
 let interruptSignal = null;
 
 function interruptExitCode() {
   return 128 + (interruptSignal === 'SIGTERM' ? 15 : 2);
+}
+
+const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
+
+function collectOutput(limitBytes, tailLength) {
+  const decoder = new StringDecoder('utf8');
+  let text = '';
+  let bytes = 0;
+  let overflow = false;
+  const append = (chunk) => {
+    text += chunk;
+    if (overflow) {
+      text = text.slice(-tailLength);
+      // A retained tail must not start halfway through a decoded surrogate pair.
+      if (text.charCodeAt(0) >= 0xdc00 && text.charCodeAt(0) <= 0xdfff) text = text.slice(1);
+    }
+  };
+  return {
+    write(data) {
+      bytes += data.length;
+      if (bytes > limitBytes) overflow = true;
+      append(decoder.write(data));
+    },
+    end() { append(decoder.end()); },
+    text: () => text,
+    overflowed: () => overflow,
+  };
 }
 
 function runChild(argv, env) {
@@ -59,53 +88,72 @@ function runChild(argv, env) {
     });
     const pgid = child.pid;
     activeChildPgid = pgid;
-    let out = '';
-    let err = '';
+    // Keep complete stdout only while it is safe to parse. After the limit, drain
+    // both streams but retain diagnostic tails and reject the truncated response.
+    const out = collectOutput(MAX_STDOUT_BYTES, 4000);
+    const err = collectOutput(0, 16000);
     let timedOut = false;
     let cancelled = false;
-    child.stdout.on('data', (data) => { out += data; });
-    child.stderr.on('data', (data) => { err += data; });
+    child.stdout.on('data', (data) => out.write(data));
+    child.stderr.on('data', (data) => err.write(data));
+    child.stdout.on('end', () => out.end());
+    child.stderr.on('end', () => err.end());
 
     const killGroup = (signal) => {
-      try { process.kill(-pgid, signal); } catch {}
+      if (pgid) {
+        try { process.kill(-pgid, signal); } catch {}
+      }
     };
     let killTimer = null;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      cancelled = true;
-      killGroup('SIGTERM');
-      killTimer = setTimeout(() => killGroup('SIGKILL'), SPAWN_KILL_GRACE_MS);
-    }, SPAWN_TIMEOUT_MS);
-
-    const clearAllTimers = () => {
+    let completion = null;
+    let finished = false;
+    const finish = () => {
+      if (!completion || finished) return;
+      // The leader may close its pipes and exit on SIGTERM while a descendant
+      // remains in its process group. Keep that group tracked until escalation.
+      if (killTimer && pgid) {
+        try { process.kill(-pgid, 0); return; } catch {}
+      }
+      finished = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
-    };
-    child.on('error', (error) => {
-      clearAllTimers();
       activeChildPgid = null;
+      terminateActiveChild = null;
       childHasFinished = true;
       resolve({
-        code: null,
-        signal: null,
-        out,
-        err: `${err}\nspawn error: ${error.message}`,
-        timedOut: false,
-        cancelled: userInterrupted,
-      });
-    });
-    child.on('exit', (code, signal) => {
-      clearAllTimers();
-      activeChildPgid = null;
-      childHasFinished = true;
-      resolve({
-        code,
-        signal,
-        out,
-        err,
+        ...completion,
+        out: out.text(),
+        err: completion.error ? `${err.text()}\nspawn error: ${completion.error.message}` : err.text(),
+        outputOverflow: out.overflowed(),
         timedOut,
         cancelled: cancelled || userInterrupted,
       });
+    };
+    terminateActiveChild = () => {
+      cancelled = true;
+      if (killTimer) return;
+      killGroup('SIGTERM');
+      killTimer = setTimeout(() => {
+        killTimer = null;
+        killGroup('SIGKILL');
+        finish();
+      }, SPAWN_KILL_GRACE_MS);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateActiveChild();
+    }, SPAWN_TIMEOUT_MS);
+
+    child.on('error', (error) => {
+      completion = { code: null, signal: null, error };
+      clearTimeout(timer);
+      finish();
+    });
+    child.on('close', (code, signal) => {
+      if (finished) return;
+      completion ??= { code, signal };
+      clearTimeout(timer);
+      finish();
     });
   });
 }
@@ -220,13 +268,14 @@ async function main() {
 
   // Adapter loading is intentionally below housekeeping dispatch. A malformed optional user
   // adapter must not prevent map-only recovery commands from listing, fixing, or resetting state.
-  if (await runHousekeeping(cliArgs)) process.exit(0);
+  if (await runHousekeeping(cliArgs)) return;
 
   const { loadAdapters } = await import('./src/adapter-loader.mjs');
   const adapters = await loadAdapters();
   if (cliArgs[0] === 'doctor') {
     const anyBackendUsable = await cmdDoctor(adapters);
-    process.exit(anyBackendUsable ? 0 : 1);
+    process.exitCode = anyBackendUsable ? 0 : 1;
+    return;
   }
 
   const dryRun = cliArgs.includes('--dry-run') || cliArgs.includes('--print-command');
@@ -238,7 +287,8 @@ async function main() {
 
   if (!backend || !thread || !mode || !prompt) {
     printUsage(adapters);
-    process.exit(2);
+    process.exitCode = 2;
+    return;
   }
   const adapter = adapters[backend];
   if (!adapter) {
@@ -310,8 +360,19 @@ async function main() {
     ? adapter.resume(record.native_session_id, augmentedPrompt)
     : adapter.fresh(augmentedPrompt);
   const env = scrubEnv(adapter.env);
-  const { code, signal, out, err, timedOut, cancelled } = await runChild(argv, env);
-  const parsed = adapter.parse(out);
+  const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
+  if (outputOverflow) {
+    console.error(`"${backend}" stdout exceeded the ${MAX_STDOUT_BYTES}-byte limit; refusing to parse truncated output.`);
+  }
+  const result = outputOverflow ? { id: null, answer: null } : adapter.parse(out);
+  // Native ids become argv values on resume. Reject malformed ids before they can
+  // be confirmed and saved, while still completing the normal outcome bookkeeping.
+  const validId = typeof result.id === 'string' && result.id.trim().length > 0 &&
+    !result.id.includes('\0');
+  const parsed = { ...result, id: validId ? result.id : null };
+  if (result.id != null && !validId) {
+    console.error(`"${backend}" returned an invalid session id: expected a non-empty string without null bytes.`);
+  }
   let newId = null;
 
   const touchedId = parsed.id ?? record.native_session_id;
@@ -374,7 +435,8 @@ async function main() {
       `"${backend}" gave ${reason} on a fresh run — NOT marking confirmed.\n` +
       `stderr tail:\n${err.slice(-2000)}\nstdout tail:\n${out.slice(-1000)}`,
     );
-    process.exit(userInterrupted ? interruptExitCode() : (parsed.id ? 3 : 1));
+    process.exitCode = userInterrupted ? interruptExitCode() : (parsed.id ? 3 : 1);
+    return;
   }
   if (mode === 'fresh') newId = parsed.id;
 
@@ -474,10 +536,12 @@ async function main() {
       `"${backend}" resume produced no parseable answer (child exit ${code}) — ` +
       'see stdout_tail above',
     );
-    process.exit(userInterrupted ? interruptExitCode() : (code === 0 ? 3 : (code ?? 1)));
+    process.exitCode = userInterrupted ? interruptExitCode() : (code === 0 ? 3 : (code ?? 1));
+    return;
   }
-  if (userInterrupted) process.exit(interruptExitCode());
-  process.exit(code === null ? 1 : code);
+  // Let Node drain stdout/stderr before exiting, including large JSON answers piped
+  // to a slow reader. process.exit() can discard writes still queued by console.log.
+  process.exitCode = userInterrupted ? interruptExitCode() : (code === null ? 1 : code);
 }
 
 function onSignal(signal) {
@@ -494,13 +558,9 @@ function onSignal(signal) {
       `\ncli-relay: ${signal} received — terminating child and recording outcome ` +
       '(Ctrl-C again to force)...',
     );
-    try { process.kill(-activeChildPgid, 'SIGTERM'); } catch {}
-    setTimeout(() => {
-      if (activeChildPgid) {
-        try { process.kill(-activeChildPgid, 'SIGKILL'); } catch {}
-      }
-    }, SPAWN_KILL_GRACE_MS);
+    terminateActiveChild();
   } else if (childHasFinished) {
+    process.exitCode = interruptExitCode();
     console.error(
       `\ncli-relay: ${signal} received — finishing in-flight bookkeeping before exit ` +
       '(Ctrl-C again to force)...',
@@ -518,8 +578,9 @@ main().catch((error) => {
   if (error instanceof RelayError) {
     const prefix = error.exitCode === 2 ? '' : 'cli-relay error: ';
     console.error(`${prefix}${error.message}`);
-    process.exit(error.exitCode);
+    process.exitCode = error.exitCode;
+    return;
   }
   console.error(`cli-relay error: ${error.message}`);
-  process.exit(1);
+  process.exitCode = 1;
 });

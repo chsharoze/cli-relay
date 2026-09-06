@@ -204,6 +204,95 @@ exit 0
 FAKE_AGY
 chmod +x "$FAKE_DIR/agy"
 
+echo
+echo "== output flush and native session id validation (hermetic backends) =="
+mkdir -p "$WORK/result-backends"
+cat > "$WORK/result-backends/agy" << 'RESULT_BACKEND'
+#!/usr/bin/env node
+const args = process.argv.slice(2);
+const prompt = args.includes('-p') ? args[args.indexOf('-p') + 1] : args.at(-1);
+const id = prompt.startsWith('INVALID:') ? JSON.parse(prompt.slice(8)) : 'valid-session';
+const answer = prompt.startsWith('LARGE') ? 'x'.repeat(1024 * 1024) : 'ok';
+if (process.argv[1].endsWith('/codex')) {
+  process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: id }) + '\n');
+  process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: answer } }) + '\n');
+} else {
+  process.stdout.write(JSON.stringify({ conversation_id: id, session_id: id, sessionId: id,
+    response: answer, result: answer, finalText: answer }) + '\n');
+}
+if (prompt === 'LARGE_NONZERO') process.exitCode = 7;
+RESULT_BACKEND
+chmod +x "$WORK/result-backends/agy"
+for binary in codex claude command-code; do
+  ln -s agy "$WORK/result-backends/$binary"
+done
+cat > "$WORK/result-harness.mjs" << 'RESULT_HARNESS'
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+const [route, mapPath] = process.argv.slice(2);
+async function run(backend, thread, prompt, slowReader = false, signalDuringOutput = null) {
+  const child = spawn(process.execPath, [route, backend, thread, 'fresh', prompt]);
+  const stdout = [];
+  let stderr = '';
+  child.stdout.on('data', (chunk) => stdout.push(chunk));
+  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+  if (slowReader) {
+    child.stdout.pause();
+    setTimeout(() => child.stdout.resume(), 200);
+  }
+  if (signalDuringOutput) {
+    child.stdout.once('data', () => {
+      child.stdout.pause();
+      setTimeout(() => child.kill(signalDuringOutput), 30);
+      setTimeout(() => child.stdout.resume(), 150);
+    });
+  }
+  const code = await new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+  return { code, stdout: Buffer.concat(stdout).toString('utf8'), stderr };
+}
+const session = (thread) => JSON.parse(readFileSync(mapPath, 'utf8')).sessions[thread];
+for (const [prompt, expectedCode] of [['LARGE', 0], ['LARGE_NONZERO', 7]]) {
+  const result = await run('agy', `flush-${prompt}`, prompt, true);
+  assert.equal(result.code, expectedCode, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.answer, 'x'.repeat(1024 * 1024));
+  assert.equal(payload.exit_code, expectedCode);
+}
+for (const [signal, expectedCode] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  const result = await run('agy', `flush-${signal}`, 'LARGE', false, signal);
+  assert.equal(result.code, expectedCode, result.stderr);
+  assert.equal(JSON.parse(result.stdout).answer, 'x'.repeat(1024 * 1024));
+}
+for (const backend of ['agy', 'codex', 'claude-code', 'command-code']) {
+  for (const [index, id] of ['bad\0id', { invalid: true }, ['bad'], 42, true, '   '].entries()) {
+    const thread = `id-${backend}-${index}`;
+    const bad = await run(backend, thread, `INVALID:${JSON.stringify(id)}`);
+    assert.equal(bad.code, 1, `${backend}: malformed id was accepted`);
+    assert.match(bad.stderr, /invalid session id/);
+    assert.equal(session(thread).status, 'ready');
+    assert.equal(session(thread).confirmed, false);
+    assert.equal(session(thread).native_session_id, null);
+    const retry = await run(backend, thread, 'VALID');
+    assert.equal(retry.code, 0, retry.stderr);
+    assert.equal(session(thread).native_session_id, 'valid-session');
+    assert.equal(session(thread).confirmed, true);
+  }
+}
+const replacement = await run('agy', 'id-agy-0', 'INVALID:{"bad":true}');
+assert.equal(replacement.code, 1);
+assert.equal(session('id-agy-0').native_session_id, 'valid-session');
+assert.equal(session('id-agy-0').status, 'ready');
+assert.equal(session('id-agy-0').confirmed, true);
+RESULT_HARNESS
+result_out=$(PATH="$WORK/result-backends:$PATH" node "$WORK/result-harness.mjs" "$ROUTE" "$MAP" 2>&1); result_code=$?
+check "large piped JSON fully drains; malformed ids fail and recover across all adapters (29 scenarios)" 0 "$result_code"
+[ -n "$result_out" ] && echo "$result_out"
+
 # 1a: the completed-run variant — a fresh run superseded by reset + recreate must NOT
 # overwrite the replacement session's (newer) native id.
 rm -rf "$MAP" "$MAP.lock"
@@ -260,11 +349,12 @@ cancelled_flag=$(python3 -c "import json; print(json.load(open('$MAP'))['session
 rm -f /tmp/route-smoke-cancel.out
 
 echo
-echo "== GLM-5.3 fixes #2/#3/#5: lock ownership on release, exclusive holder write, pid reuse =="
+echo "== lock safety: atomic holder publication, ownership on release, pid reuse =="
 cat > "$WORK/lock-harness.mjs" << 'LOCK_HARNESS'
-import {
+import fs, {
   existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync,
 } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -295,6 +385,82 @@ function check(desc, ok) {
   });
   const mine = holderDuring != null && JSON.parse(holderDuring).pid === process.pid;
   check('uncontended withLock holds and releases the lock cleanly', mine && !existsSync(LOCK_PATH));
+}
+
+// Observe the real open-before-write window deterministically. Any holder.json
+// visible here must already contain complete JSON; an exclusive direct write
+// instead exposes an empty file that a concurrent waiter would reclaim.
+{
+  const originalWrite = fs.writeFileSync;
+  let observedWriteWindow = false;
+  let exposedIncompleteHolder = false;
+  fs.writeFileSync = (file, data, options) => {
+    if (typeof file !== 'string' || !file.startsWith(`${LOCK_PATH}/`)) {
+      return originalWrite(file, data, options);
+    }
+    const fd = fs.openSync(file, options?.flag ?? 'w');
+    try {
+      observedWriteWindow = true;
+      if (existsSync(holderFile)) {
+        try { JSON.parse(readFileSync(holderFile, 'utf8')); }
+        catch { exposedIncompleteHolder = true; }
+      }
+      originalWrite(fd, data, options);
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  syncBuiltinESMExports();
+  try {
+    await withLock(() => {
+      check('published holder contains the complete record', JSON.parse(readFileSync(holderFile, 'utf8')).pid === process.pid);
+    });
+    check('the write-open window never exposes an incomplete holder', observedWriteWindow && !exposedIncompleteHolder);
+  } finally {
+    fs.writeFileSync = originalWrite;
+    syncBuiltinESMExports();
+    rmSync(LOCK_PATH, { recursive: true, force: true });
+  }
+}
+
+// A paused publisher must neither replace a successor's holder nor acquire from
+// a staging path that disappeared when its original directory was reclaimed.
+for (const reclaimDirectory of [false, true]) {
+  const originalLink = fs.linkSync;
+  const originalNow = Date.now;
+  const expired = originalNow() + LOCK_TIMEOUT_MS + 1000;
+  const successorRaw = JSON.stringify({ pid: process.ppid, ts: expired });
+  let attemptedPublication = false;
+  let entered = false;
+  let timedOut = false;
+  fs.linkSync = (source, destination) => {
+    if (destination === holderFile) {
+      attemptedPublication = true;
+      if (reclaimDirectory) {
+        const claim = `${LOCK_PATH}.sim-publication-reclaim`;
+        renameSync(LOCK_PATH, claim);
+        rmSync(claim, { recursive: true, force: true });
+        mkdirSync(LOCK_PATH);
+      }
+      writeFileSync(holderFile, successorRaw);
+      Date.now = () => expired;
+    }
+    return originalLink(source, destination);
+  };
+  syncBuiltinESMExports();
+  try {
+    try { await withLock(() => { entered = true; }); }
+    catch (error) { timedOut = error.message.includes('holds the lock'); }
+    check(
+      `publication preserves a successor after ${reclaimDirectory ? 'directory reclamation' : 'a holder collision'}`,
+      attemptedPublication && !entered && timedOut && readFileSync(holderFile, 'utf8') === successorRaw,
+    );
+  } finally {
+    fs.linkSync = originalLink;
+    Date.now = originalNow;
+    syncBuiltinESMExports();
+    rmSync(LOCK_PATH, { recursive: true, force: true });
+  }
 }
 
 // Fix #2: a holder suspended past LOCK_STALE_MS gets legitimately reclaimed; when it
@@ -363,8 +529,112 @@ function check(desc, ok) {
 process.exit(failures);
 LOCK_HARNESS
 lock_out=$(node "$WORK/lock-harness.mjs" "$(dirname "$ROUTE")" 2>&1); lock_code=$?
-check "GLM-5.3 lock fixes — release ownership, exclusive write, pid reuse, stale+gap reclaim (5 scenarios)" 0 "$lock_code"
+check "lock safety: atomic publication, successor ownership, pid reuse, stale+gap reclaim (8 scenarios)" 0 "$lock_code"
 [ -n "$lock_out" ] && echo "$lock_out"
+
+echo
+echo "== process-group cleanup: escalate after the backend leader exits =="
+cat > "$WORK/group-harness.mjs" << 'GROUP_HARNESS'
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const [route, work] = process.argv.slice(2);
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function until(predicate, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for test process');
+    await delay(20);
+  }
+}
+function alive(pid) {
+  try { process.kill(pid, 0); } catch { return false; }
+  // An orphan may briefly remain as a reaped-pending zombie on CI systems.
+  const state = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+  return !(state.stdout ?? '').trim().startsWith('Z');
+}
+let failures = 0;
+for (const mode of ['timeout', 'SIGINT', 'SIGTERM', 'timeout-inherited-pipes', 'natural-inherited-pipes']) {
+  const home = join(work, `group-${mode}`);
+  const bin = join(home, 'bin');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(home, '.cli-relay'));
+  const naturalExit = mode === 'natural-inherited-pipes';
+  const timedOut = mode.startsWith('timeout') || naturalExit;
+  writeFileSync(join(home, '.cli-relay/config.json'), JSON.stringify({
+    SPAWN_TIMEOUT_MS: timedOut ? 1200 : 10000, SPAWN_KILL_GRACE_MS: 300,
+  }));
+  writeFileSync(join(bin, 'agy'), `#!${process.execPath}\n` + `
+const { spawn } = require('node:child_process');
+const { existsSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
+writeFileSync(join(process.env.HOME, 'leader.pid'), String(process.pid));
+process.on('SIGTERM', () => {
+  writeFileSync(join(process.env.HOME, 'leader-terminated'), 'yes');
+  process.exit(0);
+});
+spawn(process.execPath, ['-e', \`
+  process.on('SIGTERM', () => {
+    require('node:fs').writeFileSync(require('node:path').join(process.env.HOME, 'descendant-terminated'), 'yes');
+  });
+  require('node:fs').writeFileSync(require('node:path').join(process.env.HOME, 'descendant.pid'), String(process.pid));
+  setInterval(() => {}, 1000);
+\`], { stdio: '${mode.endsWith('inherited-pipes') ? 'inherit' : 'ignore'}' });
+setInterval(() => {
+  if (${naturalExit} && existsSync(join(process.env.HOME, 'descendant.pid'))) {
+    writeFileSync(join(process.env.HOME, 'leader-natural-exit'), 'yes');
+    process.exit(0);
+  }
+}, 20);
+`, { mode: 0o755 });
+  const router = spawn(process.execPath, [route, 'agy', 'group-test', 'fresh', 'test'], {
+    env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  router.stdout.on('data', (chunk) => { output += chunk; });
+  router.stderr.on('data', (chunk) => { output += chunk; });
+  let result;
+  router.on('close', (code, signal) => { result = { code, signal }; });
+  let descendant;
+  let leader;
+  try {
+    await until(() => existsSync(join(home, 'descendant.pid')));
+    descendant = Number(readFileSync(join(home, 'descendant.pid'), 'utf8'));
+    leader = Number(readFileSync(join(home, 'leader.pid'), 'utf8'));
+    if (!timedOut) router.kill(mode);
+    await until(() => existsSync(join(home, 'descendant-terminated')));
+    await delay(30);
+    if (!alive(descendant)) throw new Error('descendant was killed before its grace period');
+    await until(() => result !== undefined);
+    const expected = mode === 'SIGINT' ? 130 : mode === 'SIGTERM' ? 143 : 1;
+    if (result.code !== expected) throw new Error(`exit ${result.code}/${result.signal}, expected ${expected}: ${output}`);
+    if (!existsSync(join(home, naturalExit ? 'leader-natural-exit' : 'leader-terminated'))) {
+      throw new Error('backend leader did not exit as expected');
+    }
+    await until(() => !alive(descendant), 500);
+    const record = JSON.parse(readFileSync(join(home, '.cli-relay/sessions.json'), 'utf8')).sessions['group-test'];
+    if (record.status !== 'ready' || !record.last_cancelled_by_wrapper || record.last_timed_out !== timedOut) {
+      throw new Error('cancelled outcome was not recorded correctly');
+    }
+    console.log(`PASS: ${mode} kills a SIGTERM-ignoring descendant after its leader exits`);
+  } catch (error) {
+    failures += 1;
+    console.error(`FAIL: ${mode}: ${error.message}\n${output}`);
+  } finally {
+    if (existsSync(join(home, 'leader.pid'))) leader = Number(readFileSync(join(home, 'leader.pid'), 'utf8'));
+    if (existsSync(join(home, 'descendant.pid'))) descendant = Number(readFileSync(join(home, 'descendant.pid'), 'utf8'));
+    if (leader) { try { process.kill(-leader, 'SIGKILL'); } catch {} }
+    if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch {} }
+    if (!result) router.kill('SIGKILL');
+  }
+}
+process.exitCode = failures ? 1 : 0;
+GROUP_HARNESS
+group_out=$(node "$WORK/group-harness.mjs" "$ROUTE" "$WORK" 2>&1); group_code=$?
+check "process-group escalation after leader exit (timeout, SIGINT, SIGTERM, inherited pipes, natural exit)" 0 "$group_code"
+[ -n "$group_out" ] && echo "$group_out"
 
 echo
 echo "== GLM-5.3 fix #7: doctor is a gate — exit 1 only when no backend at all is usable =="
@@ -452,6 +722,78 @@ echo "$pin_forge_out" | grep -q "END PINNED FACTS" && echo "PASS: rejection mess
 pin_cr_out=$(node "$ROUTE" pin any-thread "$(printf 'line one\rline two')" 2>&1); pin_cr_code=$?
 check "pin containing a carriage return is rejected" 2 "$pin_cr_code"
 echo "$pin_cr_out" | grep -q "single line" && echo "PASS: carriage-return pin gets the single-line message" && PASS=$((PASS+1)) || { echo "FAIL: wrong rejection message: $pin_cr_out"; FAIL=$((FAIL+1)); }
+
+echo
+echo "== live review fixes #4/#5: streaming UTF-8 and bounded backend output =="
+cat > "$FAKE_DIR/agy" << 'COLLECTION_AGY'
+#!/usr/bin/env python3
+import json, os, sys, time
+
+prompt = sys.argv[-1]
+if prompt in ('SPLIT_STDOUT', 'SPLIT_STDERR'):
+    text = 'split: café € 漢 😀'
+    fd = 1 if prompt == 'SPLIT_STDOUT' else 2
+    payload = json.dumps({'conversation_id': 'split-id', 'response': text}, ensure_ascii=False) if fd == 1 else text
+    # Deliver each byte separately, including the interior of multibyte codepoints.
+    for byte in payload.encode('utf-8'):
+        os.write(fd, bytes([byte]))
+        time.sleep(0.01)
+    os.write(fd, b'\n')
+    sys.exit(0 if fd == 1 else 1)
+if prompt in ('STDOUT_CHATTER', 'STDERR_CHATTER'):
+    fd = 1 if prompt == 'STDOUT_CHATTER' else 2
+    chunk = b'x' * 65536
+    for _ in range(2048):
+        os.write(fd, chunk)
+    os.write(fd, b'\nCHATTER_END\n')
+# A parseable final object must not make oversized, incomplete stdout acceptable.
+print(json.dumps({'conversation_id': 'collection-id', 'response': 'complete answer'}))
+COLLECTION_AGY
+chmod +x "$FAKE_DIR/agy"
+
+PATH="$FAKE_DIR:$PATH" node "$ROUTE" agy split-stdout-smoke fresh SPLIT_STDOUT > "$WORK/split-stdout.out" 2> "$WORK/split-stdout.err"; split_stdout_code=$?
+check "split UTF-8 stdout succeeds" 0 "$split_stdout_code"
+python3 - "$WORK/split-stdout.out" << 'SPLIT_STDOUT_CHECK'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+assert payload['answer'] == 'split: café € 漢 😀', payload
+assert '\ufffd' not in payload['stdout_tail'], payload
+SPLIT_STDOUT_CHECK
+check "split UTF-8 stdout preserves answer and diagnostic tail" 0 "$?"
+
+PATH="$FAKE_DIR:$PATH" node "$ROUTE" agy split-stderr-smoke fresh SPLIT_STDERR > "$WORK/split-stderr.out" 2> "$WORK/split-stderr.err"; split_stderr_code=$?
+check "split UTF-8 stderr failure is reported" 1 "$split_stderr_code"
+python3 - "$WORK/split-stderr.err" << 'SPLIT_STDERR_CHECK'
+import sys
+diagnostic = open(sys.argv[1]).read()
+assert 'split: café € 漢 😀' in diagnostic, diagnostic
+assert '\ufffd' not in diagnostic, diagnostic
+SPLIT_STDERR_CHECK
+check "split UTF-8 stderr preserves complete characters" 0 "$?"
+
+PATH="$FAKE_DIR:$PATH" node --max-old-space-size=48 "$ROUTE" agy stdout-limit-smoke fresh STDOUT_CHATTER > "$WORK/stdout-limit.out" 2> "$WORK/stdout-limit.err"; stdout_limit_code=$?
+check "128 MiB stdout is drained under a 48 MiB heap and rejected cleanly" 1 "$stdout_limit_code"
+python3 - "$MAP" "$WORK/stdout-limit.err" << 'STDOUT_LIMIT_CHECK'
+import json, sys
+session = json.load(open(sys.argv[1]))['sessions']['stdout-limit-smoke']
+diagnostic = open(sys.argv[2]).read()
+assert session['status'] == 'ready' and not session['confirmed'], session
+assert session['native_session_id'] is None, session
+assert '8388608-byte limit' in diagnostic and 'CHATTER_END' in diagnostic, diagnostic
+assert len(diagnostic.encode()) < 8000, len(diagnostic)
+STDOUT_LIMIT_CHECK
+check "stdout overflow retains a bounded tail and never confirms a truncated result" 0 "$?"
+PATH="$FAKE_DIR:$PATH" node "$ROUTE" agy stdout-limit-smoke fresh RETRY > "$WORK/stdout-retry.out" 2> "$WORK/stdout-retry.err"; stdout_retry_code=$?
+check "stdout overflow permits immediate fresh recovery" 0 "$stdout_retry_code"
+
+PATH="$FAKE_DIR:$PATH" node --max-old-space-size=48 "$ROUTE" agy stderr-limit-smoke fresh STDERR_CHATTER > "$WORK/stderr-limit.out" 2> "$WORK/stderr-limit.err"; stderr_limit_code=$?
+check "128 MiB stderr is drained under a 48 MiB heap without losing the answer" 0 "$stderr_limit_code"
+python3 - "$WORK/stderr-limit.out" << 'STDERR_LIMIT_CHECK'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+assert payload['answer'] == 'complete answer' and payload['native_session_id'] == 'collection-id', payload
+STDERR_LIMIT_CHECK
+check "stderr chatter preserves the successful stdout result" 0 "$?"
 
 rm -rf "$FAKE_DIR" "$WORK"
 

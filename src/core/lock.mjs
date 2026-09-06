@@ -1,6 +1,7 @@
 import {
-  mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  linkSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   LOCK_PATH, LOCK_RETRY_MS, LOCK_STALE_MS, LOCK_TIMEOUT_MS,
@@ -86,23 +87,25 @@ export async function withLock(fn) {
       continue;
     }
 
-    // The directory is ours and empty. Write holder.json with an EXCLUSIVE create
-    // ('wx'): if a waiter reclaimed this still-empty directory while we were
-    // suspended between mkdir and this write (a suspension longer than
-    // LOCK_TIMEOUT_MS — laptop sleep, VM pause), the successor's holder.json
-    // already exists and a plain write would silently clobber it — two holders at
-    // once (found in the GLM-5.3 audit). EEXIST throws loudly instead, and the
-    // loser falls back to the waiter path below: the successor is the rightful
-    // holder now.
+    // Publish only complete JSON: an exclusive write directly to holder.json
+    // exposes an empty file before the write finishes, which a waiter can reclaim.
+    // A hard link publishes the staged inode atomically without overwriting a
+    // successor's holder (rename would overwrite it). Keeping the staging file
+    // inside this directory also makes publication fail if that directory was
+    // reclaimed while we were suspended.
     myHolderRaw = JSON.stringify({ pid: process.pid, ts: Date.now() });
+    const stagedHolder = join(LOCK_PATH, `.holder.${randomUUID()}.tmp`);
     try {
-      writeFileSync(join(LOCK_PATH, LOCK_HOLDER_FILE), myHolderRaw, { flag: 'wx' });
+      try {
+        writeFileSync(stagedHolder, myHolderRaw, { flag: 'wx' });
+        linkSync(stagedHolder, join(LOCK_PATH, LOCK_HOLDER_FILE));
+      } finally {
+        rmSync(stagedHolder, { force: true });
+      }
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      // Our just-created directory was reclaimed mid-gap and now holds a
-      // successor's holder.json — evaluate the lock as a waiter, same as the
-      // mkdir-EEXIST case, but for a distinct reason (we briefly held the
-      // directory; the EEXIST came from the write, not the mkdir).
+      if (error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
+      // A successor published first, or reclamation removed our staging file.
+      // Judge the current directory again before attempting acquisition.
       await waitForLockSlot(deadline);
       continue;
     }
@@ -143,10 +146,8 @@ async function waitForLockSlot(deadline) {
       eligible = true; // holder.json exists but isn't valid JSON — not a state any live holder writes
     }
   } else {
-    // Missing holder.json while the lock dir exists: either mid-write (a real
-    // holder's mkdir+writeFileSync are back-to-back synchronous, resolving in
-    // microseconds, and the exclusive write now fails loudly rather than
-    // clobbering) or the holder died in that exact window and never will. Use the
+    // Missing holder.json while the lock dir exists: either publication is in
+    // progress, or the holder died before publishing. Use the
     // lock directory's own mtime — an objective fact any process can check on the
     // same physical directory — rather than this waiter's own elapsed wait time,
     // which can't tell "the original holder died" apart from "a brand-new

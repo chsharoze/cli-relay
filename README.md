@@ -164,11 +164,14 @@ Backs up and restores your actual `~/.cli-relay/sessions.json` around the run, s
 time. Covers: list/reset, fresh→resume context retention (agy), the circuit breaker's actual
 3-strikes trip (live-fired against codex with a bad id, not just traced), SIGINT mid-run
 cleanup, and SIGINT while genuinely pre-spawn (lock held elsewhere — must abort immediately
-without spawning). 56/56 passing as of the last run. Since the 2026-09-02 GLM-5.3 fixes the
+without spawning). 67/67 passing as of the last run. Since the 2026-09-02 GLM-5.3 fixes the
 tail sections also cover, hermetically (a fake `agy` shimmed onto PATH, direct lock-module
 harnesses, and PATH-stubbed binaries — no live backend needed): the reset-then-recreate
 refusal, the cancelled-resume circuit-breaker behavior, lock release ownership /
-exclusive holder write / pid reuse / stale reclaim, and `doctor`'s exit-code gate. Does not
+exclusive holder write / pid reuse / stale reclaim, and `doctor`'s exit-code gate. Since the
+2026-09-07 gpt-6-astra fixes, further hermetic sections cover: atomic lock-holder publication
+under concurrency, stdout draining before exit on large responses, streaming UTF-8 decoding
+across split chunks, and bounded stdout/stderr collection under heavy chatter. Does not
 exercise `claude-code` (real billing per call) or `command-code` resume (disabled);
 `--dry-run` is still verified manually against the real backends whenever it changes (see
 the 2026-09-01 Review history entries below for what that's caught), not by an automated
@@ -307,6 +310,37 @@ explicitly documented as CommonJS unless a `~/.cli-relay/package.json` says othe
 adapters); and the Windows process-group-kill gap is now a documented known gap rather
 than a guess-fix. The smoke suite grew hermetic fake-backend, lock-module, and doctor
 harness sections alongside the live-backend cases.
+
+**gpt-6-astra live-execution review fixes (2026-09-07), on `dev`.** A fresh `codex exec -m
+gpt-6-astra` session live-executed the real code (crafted args/env/PATH, real concurrent
+subprocesses, real temp `HOME`s) rather than reading it statically, specifically hunting for
+what the GLM-5.3 round and existing tests didn't already cover. Ten findings came back, ranked;
+the top six were fixed and verified in this pass, the remaining four (lower severity — proto-key
+pin collisions, `which`-dependent `doctor` false negatives, stderr-only diagnostics discarded on
+resume, uncaught startup stacks on a broken config) are deliberately left for a separate round.
+Two High-severity bugs, both genuinely new: (1) the lock's exclusive `holder.json` write
+published an *empty* file before its content landed, so a waiter could reclaim that
+still-empty-but-not-yet-written file and enter the critical section alongside the original
+holder — live-reproduced as real, silent write loss (40 concurrent `pin` calls all exit 0, only
+39 persist) — fixed by staging the holder's full content in a temp file and hard-linking it into
+place, so the file is never visible half-written; (2) `console.log()` queues output and
+`process.exit()` can terminate before it drains, silently truncating large successful JSON
+responses (confirmed at exactly 65,536 bytes on a 10M-character answer) — fixed by replacing
+every `process.exit()` with `process.exitCode` so Node drains stdout/stderr naturally before the
+process actually exits. Four Medium fixes alongside: a descendant process in its own group that
+ignores SIGTERM could outlive the wrapper past the configured grace period (tightened the
+escalation lifecycle to keep tracking the group past the immediate child's own exit); multi-byte
+UTF-8 characters split across `Buffer` chunks were corrupted because each chunk was decoded
+independently (switched to `node:string_decoder`'s `StringDecoder`, which is designed for
+exactly this); stdout/stderr accumulation had no upper bound, risking heap exhaustion under
+heavy backend chatter (capped collection with a bounded retained tail, not just bounded display);
+and a malformed native session id (an embedded null byte, or a non-string value) could be
+persisted as `status: "running"` and then strand the thread until the staleness window elapsed,
+because nothing validated the id at the point it was first accepted from a backend's output
+(now rejected there, before it's saved). Eleven new regression tests added to
+`tests/smoke.sh` (hermetic, fake-backend-on-PATH pattern already established) — full suite
+67/67 green, independently re-run after applying. Landed on `dev` only, `main`/the published
+npm package untouched pending a deliberate promote-and-publish decision.
 
 ## Field notes from real use
 
