@@ -62,6 +62,21 @@ cli-relay pins <thread>
 Backends: `codex`, `agy`, `claude-code`, `command-code` (command-code is fresh-only —
 its resume showed a reproducible seed-turn bug live, see file header).
 
+Dispatch flags (`--tier`, `--confirm`, `--dry-run`, and `--print-command`) must appear
+before, or interspersed among, the three routing arguments `<backend> <thread>
+<fresh|resume>`. The mode argument ends flag parsing: every token after `fresh` or
+`resume` is literal prompt text, even if it looks like a flag. For example:
+
+```sh
+cli-relay --tier=irreversible --confirm agy deploy fresh deploy the approved change
+cli-relay agy --tier=irreversible deploy --confirm fresh deploy the approved change
+cli-relay agy discuss fresh explain --confirm and --tier=irreversible
+```
+
+The first two declare and confirm tier 4. The third remains at the default tier 1 and
+passes `explain --confirm and --tier=irreversible` to the backend unchanged. In particular,
+prompt text cannot supply confirmation, override a declared tier, or activate a preview.
+
 `cli-relay doctor` checks that each backend's binary is actually resolvable on PATH —
 useful after a fresh machine setup or when a backend call fails and you're not sure whether
 it's cli-relay or the backend itself. It exits 1 only when *no* backend at all is usable
@@ -118,6 +133,21 @@ example `SPAWN_TIMEOUT_MS` or `spawnTimeoutMs`. Available settings are defined i
 `src/config.mjs`; derived values such as the lock path and stale-lock window always follow
 their configured base values. The session map and governance ledger paths are independently
 configurable as `MAP_PATH` and `LEDGER_PATH`.
+
+Ledger writers share a lock derived from the ledger's canonical path, independently
+of their session-map paths. Symlink aliases are supported; hard-linked ledger files
+are rejected with a scoped warning because they have no unique canonical pathname.
+The ledger lock does not reclaim a live writer solely by age, so a paused writer
+cannot later append a stale link. A waiter still times out with a warning; backend
+dispatch and read-only verification remain available. Session-map lock defaults are
+unchanged.
+
+Append recovery reads at most 1 MiB from the ledger tail. A missing delimiter beyond
+that window produces a warned discontinuity instead of an unbounded read. Newly
+written JSON records are limited to 1,048,574 UTF-8 bytes (excluding the newline), so
+every supported record fits the recovery window. Oversized records warn and are not
+written; they never fail the backend dispatch. An existing oversized tail is not
+silently repaired or certified. There is still no retention cap on the ledger itself.
 
 The tier gate has an isolated optional config at
 `~/.cli-relay/governance/tier-gate.json`. The supported override is a version-1 object with
@@ -326,9 +356,11 @@ now `rm -rf`; `doctor` exits 1 only when no backend at all is usable (a partial 
 the README-documented normal setup — still exits 0) so it works as a CI gate; and pin
 text containing the literal `[END PINNED FACTS]` or a carriage return is rejected, so a
 pin can no longer forge the pinned-block boundary.
-Deliberately left as-is, with reasoning: the documented `--dry-run` token-stripping
-limitation (any fix changes flag-position CLI parsing behavior, and the audience is
-agents, not free-text discussion of flags); `.js` user adapters still load, now
+At the time, the `--dry-run` token-stripping limitation was deliberately left as-is
+because fixing it changes flag-position CLI parsing behavior. The governance confirmation
+bypass later made that contract change necessary: dispatch flags now stop at the mode
+argument, as documented under Usage. Other decisions retained from this review: `.js`
+user adapters still load, now
 explicitly documented as CommonJS unless a `~/.cli-relay/package.json` says otherwise
 (chosen over dropping `.js` support — less disruptive for existing working CommonJS
 adapters); and the Windows process-group-kill gap is now a documented known gap rather
@@ -498,6 +530,3 @@ guessing at intent, the same trap this whole project has avoided everywhere else
 - `doctor`'s `which`/`where` child processes aren't tracked by the SIGINT handler — a Ctrl-C
   during `doctor` reports "nothing spawned yet" even though those children are briefly alive.
   Low severity (`which` exits in milliseconds).
-- A prompt whose text is literally `--dry-run` or `--print-command` gets stripped from the
-  prompt and treated as the flag — an edge case the flag's argv-scanning approach introduces,
-  not expected to matter in practice.

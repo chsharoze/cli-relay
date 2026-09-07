@@ -6,6 +6,8 @@ import {
   readFileSync,
   readSync,
   fstatSync,
+  realpathSync,
+  statSync,
 } from 'node:fs';
 import { LEDGER_PATH, LEDGER_PATH_CONFIG_ERROR } from '../config.mjs';
 import { withLock } from '../core/lock.mjs';
@@ -15,7 +17,9 @@ export const GENESIS_ANCHOR = 'GENESIS';
 export const CHECKPOINT_TYPE = 'checkpoint';
 
 const DISPATCH_TYPE = 'dispatch';
-const TAIL_CHUNK_BYTES = 4096;
+// Bound both recovery and newly written records. Reserve two bytes for the
+// preceding and terminating newlines so a record we write is always recoverable.
+export const MAX_LEDGER_TAIL_BYTES = 1024 * 1024;
 const GOVERNANCE_FIELDS = new Set([
   'version',
   'type',
@@ -89,7 +93,7 @@ export function computeLedgerHash(entry) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
     throw new TypeError('ledger entry must be an object');
   }
-  const unsigned = {};
+  const unsigned = Object.create(null);
   for (const key of Object.keys(entry)) {
     if (key !== 'hash') unsigned[key] = entry[key];
   }
@@ -115,12 +119,12 @@ function isJsonWhitespace(byte) {
   return byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d;
 }
 
-// Reads only enough bytes from the end to recover the final physical JSONL record.
-// It deliberately does not inspect, recompute, or validate the preceding chain.
-function readLedgerTail() {
+// Recover only a bounded suffix, even when corruption removes every delimiter.
+// Never inspect, recompute, or validate the preceding chain.
+function readLedgerTail(ledgerPath) {
   let fd;
   try {
-    fd = openSync(LEDGER_PATH, 'r');
+    fd = openSync(ledgerPath, 'r');
   } catch (error) {
     if (error.code === 'ENOENT') return { line: null, needsSeparator: false };
     throw error;
@@ -130,42 +134,25 @@ function readLedgerTail() {
     const size = fstatSync(fd).size;
     if (size === 0) return { line: null, needsSeparator: false };
 
-    const finalByte = readRange(fd, size - 1, 1)[0];
-    const needsSeparator = finalByte !== 0x0a;
-
-    let lineEnd = -1;
-    let cursor = size;
-    while (cursor > 0 && lineEnd < 0) {
-      const start = Math.max(0, cursor - TAIL_CHUNK_BYTES);
-      const chunk = readRange(fd, start, cursor - start);
-      for (let index = chunk.length - 1; index >= 0; index -= 1) {
-        if (!isJsonWhitespace(chunk[index])) {
-          lineEnd = start + index + 1;
-          break;
-        }
-      }
-      cursor = start;
+    const start = Math.max(0, size - MAX_LEDGER_TAIL_BYTES);
+    const data = readRange(fd, start, size - start);
+    const needsSeparator = data.at(-1) !== 0x0a;
+    let lineEnd = data.length;
+    while (lineEnd > 0 && isJsonWhitespace(data[lineEnd - 1])) lineEnd -= 1;
+    if (lineEnd === 0 && start === 0) return { line: null, needsSeparator };
+    const newline = lineEnd > 0 ? data.lastIndexOf(0x0a, lineEnd - 1) : -1;
+    if (start > 0 && newline < 0) {
+      warn(`tail exceeds ${MAX_LEDGER_TAIL_BYTES}-byte recovery window; appending with a discontinuity`);
+      return {
+        line: null,
+        // A non-genesis fallback cannot silently certify an unknown prefix.
+        fallbackHash: createHash('sha256').update('oversized-ledger-tail\0')
+          .update(String(size)).update('\0').update(data).digest('hex'),
+        needsSeparator,
+      };
     }
-    if (lineEnd < 0) return { line: null, needsSeparator };
-
-    let lineStart = 0;
-    cursor = lineEnd;
-    let foundNewline = false;
-    while (cursor > 0 && !foundNewline) {
-      const start = Math.max(0, cursor - TAIL_CHUNK_BYTES);
-      const chunk = readRange(fd, start, cursor - start);
-      for (let index = chunk.length - 1; index >= 0; index -= 1) {
-        if (chunk[index] === 0x0a) {
-          lineStart = start + index + 1;
-          foundNewline = true;
-          break;
-        }
-      }
-      cursor = start;
-    }
-
     return {
-      line: readRange(fd, lineStart, lineEnd - lineStart).toString('utf8'),
+      line: data.subarray(newline + 1, lineEnd).toString('utf8'),
       needsSeparator,
     };
   } finally {
@@ -193,7 +180,7 @@ function previousHashFromTail(line) {
 }
 
 function extraFields(entry) {
-  const extras = {};
+  const extras = Object.create(null);
   for (const key of Object.keys(entry).sort()) {
     if (!GOVERNANCE_FIELDS.has(key)) extras[key] = entry[key];
   }
@@ -247,10 +234,26 @@ export async function appendLedgerEntry(entry) {
     if (LEDGER_PATH_CONFIG_ERROR) {
       warn(`${LEDGER_PATH_CONFIG_ERROR}; using ${LEDGER_PATH}`);
     }
+    // Resolve symlink aliases to the same resource before selecting its lock.
+    // Creating a missing empty file publishes no event and makes dangling aliases
+    // resolvable too. Failure remains advisory in the outer catch.
+    let ledgerPath;
+    try {
+      ledgerPath = realpathSync(LEDGER_PATH);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      closeSync(openSync(LEDGER_PATH, 'a', 0o600));
+      ledgerPath = realpathSync(LEDGER_PATH);
+    }
+    // Unlike symlinks, hard-link aliases have no unique canonical pathname. Do
+    // not silently use independent locks for the same inode through two names.
+    if (statSync(ledgerPath).nlink > 1) {
+      throw new Error('hard-linked ledger files are unsupported; use one path or symlink aliases');
+    }
     await withLock(() => {
       let tail;
       try {
-        tail = readLedgerTail();
+        tail = readLedgerTail(ledgerPath);
       } catch (error) {
         // Failure to inspect existing state must not become a write gate. A conspicuous
         // non-checkpoint link records the discontinuity for verifyLedger() to report.
@@ -259,16 +262,20 @@ export async function appendLedgerEntry(entry) {
       }
       const previousHash = isCheckpoint(entry)
         ? GENESIS_ANCHOR
-        : previousHashFromTail(tail.line);
+        : (tail.fallbackHash ?? previousHashFromTail(tail.line));
       const record = normalizeEntry(entry, previousHash);
       record.hash = computeLedgerHash(record);
       const separator = tail.needsSeparator ? '\n' : '';
-      appendFileSync(LEDGER_PATH, `${separator}${JSON.stringify(record)}\n`, {
+      const serialized = JSON.stringify(record);
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_LEDGER_TAIL_BYTES - 2) {
+        throw new Error(`entry exceeds ${MAX_LEDGER_TAIL_BYTES - 2}-byte record limit`);
+      }
+      appendFileSync(ledgerPath, `${separator}${serialized}\n`, {
         encoding: 'utf8',
         flag: 'a',
         mode: 0o600,
       });
-    });
+    }, { lockPath: `${ledgerPath}.lock`, reclaimLive: false });
   } catch (error) {
     warn(`append failed: ${error?.message ?? String(error)}`);
   }

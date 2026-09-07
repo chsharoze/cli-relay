@@ -9,18 +9,18 @@ import {
 
 const LOCK_HOLDER_FILE = 'holder.json';
 
-function isPidAlive(pid) {
+function isPidAlive(pid, permissionDeniedIsAlive = false) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return permissionDeniedIsAlive && error.code === 'EPERM';
   }
 }
 
-function readHolderRaw() {
+function readHolderRaw(lockPath) {
   try {
-    return readFileSync(join(LOCK_PATH, LOCK_HOLDER_FILE), 'utf8');
+    return readFileSync(join(lockPath, LOCK_HOLDER_FILE), 'utf8');
   } catch {
     return null; // missing or unreadable — a real signal in its own right, not an error
   }
@@ -45,10 +45,10 @@ function readHolderRaw() {
 // the normal deadline/retry wait rather than looping without pause, which would otherwise
 // spin at full CPU on a persistent rename failure (e.g. a permissions problem) instead of
 // respecting LOCK_TIMEOUT_MS.
-function reclaim(expectedHolderRaw) {
-  const claim = `${LOCK_PATH}.reclaim.${process.pid}.${Date.now()}`;
+function reclaim(expectedHolderRaw, lockPath) {
+  const claim = `${lockPath}.reclaim.${process.pid}.${Date.now()}`;
   try {
-    renameSync(LOCK_PATH, claim);
+    renameSync(lockPath, claim);
   } catch {
     return false; // lost the race to someone else, or a real error (e.g. permissions) — either way, did nothing
   }
@@ -66,7 +66,7 @@ function reclaim(expectedHolderRaw) {
     // yet another party), there is nowhere safe to put it back; drop it rather than loop
     // forever — this compounds three independent low-probability races at once.
     try {
-      renameSync(claim, LOCK_PATH);
+      renameSync(claim, lockPath);
     } catch {
       rmSync(claim, { recursive: true, force: true });
     }
@@ -74,16 +74,19 @@ function reclaim(expectedHolderRaw) {
   return true;
 }
 
-export async function withLock(fn) {
+// Resource-specific callers can opt out of reclaiming a live process by age.
+// The session-map defaults are unchanged. In particular, a suspended ledger writer
+// must keep ownership until it resumes or dies, even after the usual stale window.
+export async function withLock(fn, { lockPath = LOCK_PATH, reclaimLive = true } = {}) {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let myHolderRaw = null;
   for (;;) {
     try {
-      mkdirSync(LOCK_PATH);
+      mkdirSync(lockPath);
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       // Someone else's lock directory exists — evaluate it as a waiter below.
-      await waitForLockSlot(deadline);
+      await waitForLockSlot(deadline, lockPath, reclaimLive);
       continue;
     }
 
@@ -94,11 +97,11 @@ export async function withLock(fn) {
     // inside this directory also makes publication fail if that directory was
     // reclaimed while we were suspended.
     myHolderRaw = JSON.stringify({ pid: process.pid, ts: Date.now() });
-    const stagedHolder = join(LOCK_PATH, `.holder.${randomUUID()}.tmp`);
+    const stagedHolder = join(lockPath, `.holder.${randomUUID()}.tmp`);
     try {
       try {
         writeFileSync(stagedHolder, myHolderRaw, { flag: 'wx' });
-        linkSync(stagedHolder, join(LOCK_PATH, LOCK_HOLDER_FILE));
+        linkSync(stagedHolder, join(lockPath, LOCK_HOLDER_FILE));
       } finally {
         rmSync(stagedHolder, { force: true });
       }
@@ -106,7 +109,7 @@ export async function withLock(fn) {
       if (error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
       // A successor published first, or reclamation removed our staging file.
       // Judge the current directory again before attempting acquisition.
-      await waitForLockSlot(deadline);
+      await waitForLockSlot(deadline, lockPath, reclaimLive);
       continue;
     }
     break;
@@ -115,7 +118,7 @@ export async function withLock(fn) {
   try {
     return await fn();
   } finally {
-    releaseLock(myHolderRaw);
+    releaseLock(myHolderRaw, lockPath);
   }
 }
 
@@ -124,8 +127,8 @@ export async function withLock(fn) {
 // us and then legitimately reclaimed out from under our suspended holder.json
 // write. Judge the current holder, reclaim it if eligible, and otherwise sleep
 // until the deadline.
-async function waitForLockSlot(deadline) {
-  const holderRaw = readHolderRaw();
+async function waitForLockSlot(deadline, lockPath, reclaimLive) {
+  const holderRaw = readHolderRaw(lockPath);
   let eligible = false;
   if (holderRaw !== null) {
     try {
@@ -139,9 +142,11 @@ async function waitForLockSlot(deadline) {
       // after LOCK_TIMEOUT_MS (found in the GLM-5.3 audit; the mirror-image
       // false-positive, pid reuse by an unrelated process, still self-heals via
       // the timestamp path above).
-      eligible = Date.now() - holder.ts > LOCK_STALE_MS ||
-        !isPidAlive(holder.pid) ||
-        holder.pid === process.pid;
+      // Resource locks also allow overlapping calls within one process: our own
+      // live pid is not stale evidence when reclaimLive is disabled.
+      eligible = (reclaimLive && Date.now() - holder.ts > LOCK_STALE_MS) ||
+        !isPidAlive(holder.pid, !reclaimLive) ||
+        (reclaimLive && holder.pid === process.pid);
     } catch {
       eligible = true; // holder.json exists but isn't valid JSON — not a state any live holder writes
     }
@@ -153,14 +158,14 @@ async function waitForLockSlot(deadline) {
     // which can't tell "the original holder died" apart from "a brand-new
     // holder's mkdir just landed."
     try {
-      eligible = Date.now() - statSync(LOCK_PATH).mtimeMs > LOCK_TIMEOUT_MS;
+      eligible = Date.now() - statSync(lockPath).mtimeMs > LOCK_TIMEOUT_MS;
     } catch {
       eligible = false; // the directory itself vanished already — nothing here to reclaim
     }
   }
-  if (eligible && reclaim(holderRaw)) return;
+  if (eligible && reclaim(holderRaw, lockPath)) return;
   if (Date.now() > deadline) {
-    throw new Error(`another cli-relay invocation holds the lock (${LOCK_PATH}) — not waiting forever`);
+    throw new Error(`another cli-relay invocation holds the lock (${lockPath}) — not waiting forever`);
   }
   await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
 }
@@ -175,10 +180,10 @@ async function waitForLockSlot(deadline) {
 // path can win), verify the captured holder.json is still this process's own
 // write, and only then rm; if it isn't ours, put it back for the rightful holder
 // rather than destroying it.
-function releaseLock(myHolderRaw) {
-  const claim = `${LOCK_PATH}.release.${process.pid}.${Date.now()}`;
+function releaseLock(myHolderRaw, lockPath) {
+  const claim = `${lockPath}.release.${process.pid}.${Date.now()}`;
   try {
-    renameSync(LOCK_PATH, claim);
+    renameSync(lockPath, claim);
   } catch {
     return; // nothing at LOCK_PATH (or a real error) — nothing to either verify or destroy
   }
@@ -196,7 +201,7 @@ function releaseLock(myHolderRaw) {
     // another party there is nowhere safe to put it back — drop it rather than
     // loop forever, the same compounding-race reasoning as reclaim().
     try {
-      renameSync(claim, LOCK_PATH);
+      renameSync(claim, lockPath);
     } catch {
       rmSync(claim, { recursive: true, force: true });
     }

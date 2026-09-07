@@ -1025,14 +1025,14 @@ function assertIntactReport(report, totalEntries) {
   assert.equal(spawnCount(paths), 1);
   const localTier = await runCli(
     paths,
-    ['agy', 'tier-local', 'fresh', 'local', '--tier=local'],
+    ['agy', '--tier=local', 'tier-local', 'fresh', 'local'],
   );
   expectCode(localTier, 0, 'named tier 2');
   assert.equal(spawnCount(paths), 2);
 
   const tier3Refused = await runCli(
     paths,
-    ['agy', 'tier-three-refused', 'fresh', 'refuse', '--tier', '3'],
+    ['agy', 'tier-three-refused', '--tier', '3', 'fresh', 'refuse'],
   );
   expectCode(tier3Refused, 1, 'tier 3 without confirmation');
   assert.equal(tier3Refused.stdout, '');
@@ -1049,12 +1049,12 @@ function assertIntactReport(report, totalEntries) {
 
   const tier3Allowed = await runCli(
     paths,
-    ['--confirm', 'agy', 'tier-three-allowed', 'fresh', 'allow', '--tier', '3'],
+    ['--confirm', 'agy', 'tier-three-allowed', '--tier', '3', 'fresh', 'allow'],
   );
   expectCode(tier3Allowed, 0, 'confirmed tier 3');
   const tier4Allowed = await runCli(
     paths,
-    ['agy', 'tier-four-allowed', 'fresh', 'allow', '--tier=irreversible', '--confirm'],
+    ['agy', 'tier-four-allowed', '--tier=irreversible', '--confirm', 'fresh', 'allow'],
   );
   expectCode(tier4Allowed, 0, 'confirmed tier 4');
   assert.equal(spawnCount(paths), 4);
@@ -1095,12 +1095,12 @@ function assertIntactReport(report, totalEntries) {
   assert.ok(!previewArgv.includes('--confirm'));
   const refusedPreview = await runCli(
     paths,
-    ['agy', 'preview-two', 'fresh', 'preview', '--tier=3', '--dry-run'],
+    ['agy', '--dry-run', 'preview-two', '--tier=3', 'fresh', 'preview'],
   );
   expectCode(refusedPreview, 1, 'unconfirmed tier 3 dry run');
   const allowedPreview = await runCli(
     paths,
-    ['--print-command', 'agy', 'preview-three', 'fresh', 'preview', '--tier', '3', '--confirm'],
+    ['--print-command', 'agy', '--tier', '3', 'preview-three', '--confirm', 'fresh', 'preview'],
   );
   expectCode(allowedPreview, 0, 'confirmed tier 3 print-command');
   assert.equal(spawnCount(paths), 4);
@@ -1110,18 +1110,67 @@ function assertIntactReport(report, totalEntries) {
 
   const invalidTier = await runCli(
     paths,
-    ['agy', 'tier-invalid', 'fresh', 'invalid', '--tier=5'],
+    ['agy', 'tier-invalid', '--tier=5', 'fresh', 'invalid'],
   );
   expectCode(invalidTier, 2, 'invalid tier value');
   assert.match(invalidTier.stderr, /invalid tier/);
   const missingTier = await runCli(
     paths,
-    ['agy', 'tier-missing', 'fresh', 'invalid', '--tier'],
+    ['agy', 'tier-missing', '--tier'],
   );
   expectCode(missingTier, 2, 'missing tier value');
   assert.match(missingTier.stderr, /--tier requires/);
   assert.equal(spawnCount(paths), 4);
   assert.equal(ledgerEntries(paths).length, ledgerCount);
+}
+
+// Routing ends at mode: all later tokens are prompt text, never capabilities or
+// preview controls. The old exact example now dispatches at tier 1, not tier 4.
+{
+  const paths = homeFor('flag-boundary');
+  const prompt = ['--tier=irreversible', 'please', '--confirm', 'this-deploy'];
+  const original = await runCli(paths, ['agy', 'thread', 'fresh', ...prompt]);
+  expectCode(original, 0, 'original argv is now literal tier-1 prompt');
+  assert.equal(ledgerEntries(paths).at(-1).tier, 1);
+  const lastPrompt = () => JSON.parse(readFileSync(paths.spawnLog, 'utf8').trim().split('\n').at(-1)).at(-1);
+  assert.equal(lastPrompt(), prompt.join(' '));
+
+  for (const tier of ['3', 'irreversible']) {
+    for (const suffix of [
+      ['please', '--confirm', 'this-deploy'],
+      ['--tier=1', 'please', '--confirm', 'this-deploy'],
+      ['--tier', 'read-only', '--confirm', '--dry-run', '--print-command'],
+    ]) {
+      const before = spawnCount(paths);
+      const denied = await runCli(paths, ['agy', `denied-${tier}`, `--tier=${tier}`, 'fresh', ...suffix]);
+      expectCode(denied, 1, 'prompt cannot confirm or downgrade a declared high tier');
+      assert.match(denied.stderr, /requires an explicit --confirm/);
+      assert.equal(spawnCount(paths), before);
+      assert.equal(ledgerEntries(paths).at(-1).gate_allowed, false);
+      assert.equal(ledgerEntries(paths).at(-1).tier, tier === '3' ? 3 : 4);
+    }
+    const allowed = await runCli(paths, ['--confirm', 'agy', `allowed-${tier}`, '--tier', tier, 'fresh', ...prompt]);
+    expectCode(allowed, 0, 'pre-mode confirmation permits high tier');
+    assert.equal(lastPrompt(), prompt.join(' '));
+    assert.equal(ledgerEntries(paths).at(-1).tier, tier === '3' ? 3 : 4);
+  }
+
+  // Even invalid/missing tier syntax is harmless text after mode. Both preview
+  // flags must cause a real dispatch there, while remaining previews before mode.
+  const literalFlags = ['please', '--confirm', '--tier=5', '--tier', '--dry-run', '--print-command'];
+  const literal = await runCli(paths, ['agy', 'literal-flags', 'fresh', ...literalFlags]);
+  expectCode(literal, 0, 'all post-mode flags preserved verbatim');
+  assert.equal(lastPrompt(), literalFlags.join(' '));
+  assert.equal(ledgerEntries(paths).at(-1).tier, 1);
+  for (const flag of ['--dry-run', '--print-command']) {
+    const before = spawnCount(paths);
+    const count = ledgerEntries(paths).length;
+    const preview = await runCli(paths, ['agy', 'literal-preview', flag, 'fresh', ...literalFlags]);
+    expectCode(preview, 0, 'pre-mode preview preserves post-mode flags');
+    assert.equal(JSON.parse(preview.stdout).at(-1), literalFlags.join(' '));
+    assert.equal(spawnCount(paths), before);
+    assert.equal(ledgerEntries(paths).length, count);
+  }
 }
 
 // This policy owns malformed optional config. The warning is scoped to the tier gate,
@@ -1145,7 +1194,7 @@ function assertIntactReport(report, totalEntries) {
   assert.doesNotMatch(defaultTier.stderr, /governance ledger|adapter .*failed/);
   const refused = await runCli(
     paths,
-    ['agy', 'malformed-tier-three', 'fresh', 'safe', '--tier=3'],
+    ['agy', 'malformed-tier-three', '--tier=3', 'fresh', 'safe'],
   );
   expectCode(refused, 1, 'tier 3 fallback with malformed config');
   assert.match(refused.stderr, /warning: tier-gate config failed to load/);
@@ -1198,6 +1247,13 @@ GOVERNANCE_HARNESS
 governance_out=$(node "$WORK/governance-harness.mjs" "$ROUTE" "$WORK" "$WORK/governance-ledger-worker.mjs" 2>&1); governance_code=$?
 check "governance ledger + tier gate hermetic regression coverage" 0 "$governance_code"
 [ -n "$governance_out" ] && echo "$governance_out"
+
+echo
+echo "== governance audit regressions: resource locks and bounded ledger recovery =="
+node "$(dirname "$ROUTE")/tests/ledger-lock-regressions.mjs"
+check "shared ledger aliases and suspended writers serialize without stale links" 0 "$?"
+node "$(dirname "$ROUTE")/tests/ledger-data-regressions.mjs"
+check "proto-named fields and bounded delimiter-corruption recovery" 0 "$?"
 
 rm -rf "$FAKE_DIR" "$WORK"
 

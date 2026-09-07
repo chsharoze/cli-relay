@@ -13,6 +13,9 @@
  *   cli-relay unpin <thread> <index>
  *   cli-relay pins <thread>
  *
+ * Dispatch flags must precede the mode argument. They may be interspersed among
+ * backend/thread/mode; every token after mode is literal prompt text.
+ *
  * Exit codes:
  *   0  success
  *   1  general error or backend spawn failure (also `doctor`, when no backend at
@@ -208,9 +211,20 @@ function printUsage(backends) {
   console.error('       cli-relay pin <thread> "<fact>"');
   console.error('       cli-relay unpin <thread> <index>');
   console.error('       cli-relay pins <thread>');
+  console.error('dispatch flags must precede <fresh|resume>; all following tokens are prompt text');
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
 
+// Governance/routing flags (--dry-run, --print-command, --tier, --confirm) are only
+// recognized before the third positional routing argument (mode: fresh/resume) is
+// collected. Once mode is filled in, every remaining word is prompt text by definition
+// and must never be reinterpreted as a flag -- a prompt that happens to contain the
+// literal word "--confirm" (or "--tier", "--dry-run") as one of its tokens must not be
+// able to grant a tier-3/4 dispatch or otherwise alter routing. This was a real,
+// live-reproduced bypass: `cli-relay agy t fresh --tier=irreversible please --confirm x`
+// used to pass tier 4 with gate_allowed:true, because the old scan checked every
+// argument regardless of position. Under this contract that entire suffix is prompt
+// text at the default tier 1; a tier-4 request must declare its tier before mode.
 function parseDispatchFlags(cliArgs) {
   let dryRun = false;
   let confirm = false;
@@ -220,6 +234,11 @@ function parseDispatchFlags(cliArgs) {
 
   for (let index = 0; index < cliArgs.length; index += 1) {
     const argument = cliArgs[index];
+    const routingComplete = routingArgs.length >= 3;
+    if (routingComplete) {
+      routingArgs.push(argument);
+      continue; // No flag handler, current or future, may inspect prompt tokens.
+    }
     if (argument === '--dry-run' || argument === '--print-command') {
       dryRun = true;
       continue;
