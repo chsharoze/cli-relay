@@ -231,6 +231,13 @@ exercise `claude-code` (real billing per call) or `command-code` resume (disable
 the 2026-09-01 Review history entries below for what that's caught), not by an automated
 case in this file yet.
 
+`tests/process-tree.mjs` checks platform-specific termination with mocked process
+and subprocess calls, including exact POSIX signal arguments, Windows
+`taskkill /T /F /PID <pid>` arguments, and visible failure warnings. The smoke suite
+also executes the real POSIX timeout, interrupt, and descendant-cleanup cases.
+Windows process-tree termination still requires a separate live Windows check;
+the mocked branch tests do not substitute for that platform validation.
+
 ```
 bash tests/smoke.sh
 ```
@@ -520,13 +527,13 @@ guessing at intent, the same trap this whole project has avoided everywhere else
   finished), so the thread doesn't self-heal via lock staleness — it stays stuck until
   `LOCK_STALE_MS` (~21 min) passes on the *next* invocation against that thread. Narrow
   window, real gap; not closed here.
-- **Windows process-group cleanup is POSIX-only (documented 2026-09-02, not fixed).**
-  `package.json` declares no `os` restriction, but the wrapper's child termination —
-  `process.kill(-pgid, ...)` for Ctrl-C and the spawn timeout — no-ops on Windows, so a
-  backend child there would survive a router-initiated kill. A real fix needs
-  `taskkill /T /F` and a Windows box to verify against; this repo's test, dev, and
-  publish history is entirely macOS/Linux, so it's flagged here rather than
-  guess-fixed.
+- **Windows process-tree cleanup: implemented, live validation pending.** Timeout
+  and Ctrl-C use one shell-free `taskkill /T /F /PID <pid>` call on Windows, with a
+  positive PID and visible errors. POSIX retains its SIGTERM/grace/SIGKILL sequence;
+  ESRCH remains benign, while other signal failures warn. Windows invocation and
+  asynchronous cleanup are mock-tested here, not yet exercised on a Windows host.
+  In particular, mocks do not establish descendant cleanup after the root PID has
+  already exited; that needs separate Windows validation.
 - `doctor`'s `which`/`where` child processes aren't tracked by the SIGINT handler — a Ctrl-C
   during `doctor` reports "nothing spawned yet" even though those children are briefly alive.
   Low severity (`which` exits in milliseconds).

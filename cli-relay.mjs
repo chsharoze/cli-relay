@@ -46,6 +46,7 @@ import { RelayError } from './src/core/errors.mjs';
 import { withLock } from './src/core/lock.mjs';
 import { loadMap, saveMap } from './src/core/map-store.mjs';
 import { buildPinnedBlock } from './src/core/pins.mjs';
+import { isProcessGroupAlive, killProcessTree } from './src/core/process-tree.mjs';
 import { withThreadSuggestions } from './src/core/thread-lookup.mjs';
 import { appendLedgerEntry } from './src/governance/ledger.mjs';
 
@@ -106,20 +107,21 @@ function runChild(argv, env) {
     child.stdout.on('end', () => out.end());
     child.stderr.on('end', () => err.end());
 
-    const killGroup = (signal) => {
-      if (pgid) {
-        try { process.kill(-pgid, signal); } catch {}
-      }
-    };
+    const killGroup = (signal) => killProcessTree(pgid, signal);
     let killTimer = null;
+    let windowsKillPromise = null;
+    let windowsKillPending = false;
     let completion = null;
     let finished = false;
     const finish = () => {
       if (!completion || finished) return;
+      // Backend close may precede taskkill's callback. Keep its result/error
+      // observable before recording the outcome or servicing a forced exit.
+      if (windowsKillPending) return;
       // The leader may close its pipes and exit on SIGTERM while a descendant
       // remains in its process group. Keep that group tracked until escalation.
       if (killTimer && pgid) {
-        try { process.kill(-pgid, 0); return; } catch {}
+        if (isProcessGroupAlive(pgid)) return;
       }
       finished = true;
       clearTimeout(timer);
@@ -138,6 +140,16 @@ function runChild(argv, env) {
     };
     terminateActiveChild = () => {
       cancelled = true;
+      if (process.platform === 'win32') {
+        if (!windowsKillPromise) {
+          windowsKillPending = true;
+          windowsKillPromise = Promise.resolve(killGroup('SIGTERM')).then(() => {
+            windowsKillPending = false;
+            finish();
+          });
+        }
+        return windowsKillPromise;
+      }
       if (killTimer) return;
       killGroup('SIGTERM');
       killTimer = setTimeout(() => {
@@ -699,7 +711,13 @@ async function main() {
 function onSignal(signal) {
   if (userInterrupted) {
     if (activeChildPgid) {
-      try { process.kill(-activeChildPgid, 'SIGKILL'); } catch {}
+      if (process.platform === 'win32') {
+        // Reuse the already-started forceful tree kill; exiting immediately here
+        // could discard its failure warning before the callback runs.
+        terminateActiveChild().then(() => process.exit(interruptExitCode()));
+        return;
+      }
+      killProcessTree(activeChildPgid, 'SIGKILL');
     }
     process.exit(interruptExitCode());
   }

@@ -547,6 +547,11 @@ check "lock safety: atomic publication, successor ownership, pid reuse, stale+ga
 [ -n "$lock_out" ] && echo "$lock_out"
 
 echo
+echo "== platform-specific process-tree termination (unit mocks) =="
+node "$(dirname "$ROUTE")/tests/process-tree.mjs"
+check "POSIX signal contract, Windows taskkill lifecycle, and visible kill failures" 0 "$?"
+
+echo
 echo "== process-group cleanup: escalate after the backend leader exits =="
 cat > "$WORK/group-harness.mjs" << 'GROUP_HARNESS'
 import { spawn, spawnSync } from 'node:child_process';
