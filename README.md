@@ -617,6 +617,16 @@ repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
 ## Known gaps (not blocking, worth knowing)
 
 - `command-code` resume stays disabled until its seed-turn-drop bug is root-caused.
+- **`command-code`'s adapter was spawning with `--trust`, which does not grant real file
+  access (found 2026-09-11).** `--trust` only skips command-code's initial "trust this
+  project" prompt — it does not bypass per-tool-call permission checks in headless `-p` mode,
+  so every file read/write silently returned `permission_denied` while the process still
+  exited 0, looking like a clean run that did almost nothing. Fixed in `src/adapters/
+  command-code.mjs` by switching to `--yolo`. The model is now overridable per call via
+  `CLI_RELAY_COMMAND_CODE_MODEL` (falls back to the prior hardcoded `zai-org/glm-5.2` when
+  unset) — command-code routes 68 models and different threads legitimately want different
+  ones; `--model`/`--effort` on the CLI itself are not yet wired through cli-relay's own
+  dispatch flags, this is a stopgap env-var override until they are.
 - `claude-code` calls hit real Anthropic billing against the Pro plan (confirmed ~$0.07-0.13
   per short test call) — not free the way codex/agy effectively are for testing.
 - Grandchild processes that double-fork/setsid out of a backend's process group would survive
