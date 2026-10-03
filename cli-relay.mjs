@@ -12,6 +12,9 @@
  *   cli-relay pin <thread> "<fact>"
  *   cli-relay unpin <thread> <index>
  *   cli-relay pins <thread>
+ *   cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend>
+ *     --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]
+ *   cli-relay loop check <thread> [--plan <path>] [--repo <path>]
  *
  * Dispatch flags must precede the mode argument. They may be interspersed among
  * backend/thread/mode; every token after mode is literal prompt text.
@@ -29,6 +32,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { cmdAuditVerify } from './src/commands/audit.mjs';
 import { cmdDoctor } from './src/commands/doctor.mjs';
 import { cmdList } from './src/commands/list.mjs';
+import { cmdLoopCheck, cmdLoopRecord } from './src/commands/loop.mjs';
 import { cmdPin } from './src/commands/pin.mjs';
 import { cmdPins } from './src/commands/pins.mjs';
 import { cmdReset } from './src/commands/reset.mjs';
@@ -44,7 +48,7 @@ import {
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
 import { withLock } from './src/core/lock.mjs';
-import { loadMap, saveMap } from './src/core/map-store.mjs';
+import { loadMap, resumeBindingMismatch, saveMap } from './src/core/map-store.mjs';
 import { buildPinnedBlock } from './src/core/pins.mjs';
 import { isProcessGroupAlive, killProcessTree } from './src/core/process-tree.mjs';
 import { withThreadSuggestions } from './src/core/thread-lookup.mjs';
@@ -208,6 +212,17 @@ async function runHousekeeping(cliArgs) {
     cmdPins(cliArgs[1]);
     return true;
   }
+  if (cliArgs[0] === 'loop') {
+    if (cliArgs[1] === 'record') {
+      await cmdLoopRecord(cliArgs[2], cliArgs.slice(3));
+    } else if (cliArgs[1] === 'check') {
+      cmdLoopCheck(cliArgs[2], cliArgs.slice(3));
+    } else {
+      console.error('usage: cli-relay loop record|check <thread> [flags...]');
+      process.exitCode = 2;
+    }
+    return true;
+  }
   return false;
 }
 
@@ -223,6 +238,11 @@ function printUsage(backends) {
   console.error('       cli-relay pin <thread> "<fact>"');
   console.error('       cli-relay unpin <thread> <index>');
   console.error('       cli-relay pins <thread>');
+  console.error(
+    '       cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> ' +
+    '--verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]',
+  );
+  console.error('       cli-relay loop check <thread> [--plan <path>] [--repo <path>]');
   console.error('dispatch flags must precede <fresh|resume>; all following tokens are prompt text');
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
@@ -316,6 +336,20 @@ function sessionForInvocation(map, backend, thread, mode, adapter) {
       throw new RelayError(
         'NO_CONFIRMED_SESSION',
         existing ? message : withThreadSuggestions(message, map.sessions, thread),
+      );
+    }
+    // Cherry-picked from paperclip's verify-before-resume checkpoint validation, scoped
+    // down to the one binding a CLI router actually has (see map-store.mjs). Covers both
+    // the dry-run preview and the real dispatch below, since both call this function —
+    // the same reason assertNotInFlight lives here rather than only in the real-dispatch path.
+    const mismatch = resumeBindingMismatch(session, { cwd: process.cwd() });
+    if (mismatch) {
+      throw new RelayError(
+        'RESUME_BINDING_MISMATCH',
+        `thread "${thread}" was created in a different directory than this invocation ` +
+        `(mismatch: ${mismatch}) — refusing to resume a session across a context it ` +
+        'wasn\'t bound to; run fresh in this directory to rebind the thread, or re-run ' +
+        'from the original directory to resume it',
       );
     }
   }
@@ -471,6 +505,7 @@ async function main() {
     if (mode === 'fresh') {
       session.turn_count = 1;
       session.created_iso = new Date().toISOString();
+      session.binding = { cwd: process.cwd() };
       delete session.compaction_detected;
     } else {
       session.turn_count = (session.turn_count ?? 1) + 1;

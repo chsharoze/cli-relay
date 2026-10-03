@@ -57,6 +57,9 @@ cli-relay reset <thread>
 cli-relay pin <thread> "<fact>"
 cli-relay unpin <thread> <index>
 cli-relay pins <thread>
+cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> \
+  --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]
+cli-relay loop check <thread> [--plan <path>] [--repo <path>]
 ```
 
 Backends: `codex`, `agy`, `claude-code`, `command-code` (command-code is fresh-only —
@@ -199,6 +202,9 @@ lives under `src/`:
   recognizes explicit checkpoint records as valid new anchors so a future retention policy
   cannot silently slice away chain history.
 - `src/governance/tier-gate.mjs` — independently loaded escalation-tier policy.
+- `src/governance/approval.mjs` — `cli-relay loop`'s plan-bound review approval: verdict
+  schema validation, repo-tree fingerprinting, and approval record/recheck. See
+  "cli-relay loop" above.
 - `src/adapter-loader.mjs` — discovery, validation, and the `assertAdapterRegistry`
   completeness check described above.
 - `src/adapters/` — one file per backend.
@@ -405,6 +411,45 @@ because nothing validated the id at the point it was first accepted from a backe
 67/67 green, independently re-run after applying. Landed on `dev` only, `main`/the published
 npm package untouched pending a deliberate promote-and-publish decision.
 
+## Cherry-picked hardening from paperclip (2026-10-03)
+
+A comparison against paperclip (a much larger multi-tenant agent-management platform with a
+more rigorous resume-by-reference implementation) surfaced one real gap: cli-relay resumed any
+confirmed `native_session_id` with no check that the invocation's context still matched the one
+the session was created in. Ported the idea, not the implementation — paperclip's
+company/agent/issue/workspace/tool-schema equality check and SHA-256 tool-contract fingerprint
+don't map onto a CLI router that owns no tool schema and is single-tenant by design. What
+actually transferred:
+
+- Each session now records a `binding: { cwd }` at fresh-creation (`cli-relay.mjs`, the `fresh`
+  branch of critical section 1). `resumeBindingMismatch()` (`src/core/map-store.mjs`) compares
+  it against the current invocation's `realpath`'d cwd before a resume is allowed to proceed,
+  called from `sessionForInvocation`'s resume branch — the single function both `--dry-run` and
+  the real dispatch go through, so both paths refuse the same mismatched resume.
+- Backend is deliberately not re-checked in the new function — `THREAD_OWNERSHIP_MISMATCH`
+  already guarantees it earlier in the same function, so re-checking it would be dead logic.
+- Model was deliberately left out of the binding entirely, not just unchecked: codex rotates
+  models across turns by design, agy hardcodes one, command-code's resume is disabled — there's
+  no consistent per-backend pinning behavior to compare against, so a model mismatch check would
+  be noise, not signal.
+- Paperclip's tool-contract SHA-256 fingerprint does not transfer at all — it exists because
+  paperclip injects a fixed, versioned set of MCP tool definitions into a provider; cli-relay
+  shells out to CLIs and owns no such schema to hash. Confirmed by reading paperclip's real
+  source rather than assumed from its docs.
+- A session with no `binding` field (anything created before this change) is grandfathered —
+  `resumeBindingMismatch` returns no mismatch rather than refusing resume, so upgrading
+  cli-relay doesn't break every thread that already existed. Verified live: a pre-existing
+  no-binding session resumes cleanly from any directory; a post-upgrade session refuses to
+  resume from a directory other than the one it was created in, with a clear
+  `RESUME_BINDING_MISMATCH` error naming which field mismatched.
+
+Two further paperclip ideas were deliberately not ported, to keep this a pointed fix rather than
+scope creep: its bootstrap-admission invariant (a session id may only rotate before it has a
+live process) is already enforced by cli-relay's own `isSameSessionInstance`/reset-recreate
+guards, just under different names; its delta-only continuation (send only the new turn on
+resume, not full replay) is already how every adapter's `resume()` works here — cli-relay never
+replayed transcripts to begin with, per its own design section above.
+
 ## Field notes from real use
 
 First real-world use (2026-08-17, an audit task run across all three model lanes in
@@ -499,6 +544,75 @@ resuming a thread correctly answered a fact that was never in the visible prompt
 genuinely new native session after a `fresh` restart still knew it. Deliberately NOT
 auto-detecting "this looks like a correction" from prompt text to auto-pin it — that's
 guessing at intent, the same trap this whole project has avoided everywhere else.
+
+## cli-relay loop — plan-bound review approval
+
+Added 2026-09-22, ported (deliberately, not wholesale) from an independent read-only source
+review of [claudex-loop](https://github.com/chaseai-yt/claudex-loop) — see
+`~/Desktop/repo-evaluations-2026-09-21/claudex-loop-analysis-DS-Flash.md` for the source
+analysis this is built from. Named `loop` because that's what it governs: a
+plan → review → build loop where a review verdict must still hold by the time anything acts
+on it. It lives inside cli-relay, not as a separate tool, because the thing being bound
+(a verdict) is produced by exactly the kind of dispatch cli-relay already routes and
+hash-chains — the reviewer is one of your four backends, picked per call, same as any other
+`cli-relay` dispatch.
+
+```
+cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> \
+  --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] \
+  [--coverage "<text>"] [--limitations "<text>"] [--findings <json-or-@file>]
+cli-relay loop check <thread> [--plan <path>] [--repo <path>]
+```
+
+**Who picks the reviewer and model:** `--reviewer` names the cli-relay backend that produced
+the verdict (`codex`, `claude-code`, `agy`, `command-code`) and `--model` optionally records
+which model within it, purely as an audit field on the recorded approval — it does not itself
+dispatch anything. You (or the agent orchestrating the loop) run the actual review however you
+already do — `cli-relay <reviewer> <thread> fresh "<review prompt>"`, or a real codex/claude
+CLI call with read-only flags per `codex-pipeline` — read its structured verdict back, then
+call `loop record` with the exact backend/model that produced it. This keeps model choice a
+per-call decision (yours, or the agent's, made explicit in the command) rather than a fixed
+config value that goes stale the way the `agy` model catalog already has once (see Known gaps).
+A future pass could add `loop review` to auto-dispatch to `--reviewer`/`--model` and parse its
+JSON verdict directly; today `loop record` takes an already-produced verdict as input.
+
+**What gets bound, and why the recheck matters.** `loop record` hashes the plan file's exact
+bytes (SHA-256) and fingerprints the entire repo tree (every file's content hash, every
+symlink's literal target, combined into one canonical-JSON manifest and hashed — see
+`src/governance/approval.mjs`), then stores both alongside the exact resolved `--plan`/`--repo`
+paths and the verdict. `loop check` recomputes both from what's on disk right now and refuses
+unless everything still matches — the plan hasn't changed, the repo hasn't changed, the paths
+are the exact ones reviewed, and the recorded verdict is `APPROVED`. This is what stops a
+`REVISE`/`BLOCKED` verdict — or an `APPROVED` one issued against an earlier revision — from
+being treated as current. `loop check` returns exit 0 only when every one of those holds; on
+a tree mismatch it also reports which files changed/were added/removed, same idea as
+claudex-loop's before/after recheck.
+
+**Verdict schema** (`validateVerdict` in `src/governance/approval.mjs`) rejects a
+self-contradictory result before it's ever recorded: exact key set, `verdict` one of
+`APPROVED`/`REVISE`/`BLOCKED`, non-empty `summary`, findings with unique ids and a
+`low`/`medium`/`high` severity, `coverage` required unless `BLOCKED`, `REVISE` must carry at
+least one finding, `BLOCKED` must carry `limitations` — and, the rule that actually matters,
+**`APPROVED` cannot carry a medium/high finding**. An invalid verdict is refused by
+`loop record` with exit 1 and never reaches disk as a recorded approval.
+
+Every `loop record` also appends a best-effort entry to the same hash-chained governance
+ledger (`cli-relay audit verify`) that real dispatches use — no ledger schema change was
+needed; the plan hash, snapshot fingerprint, reviewer, model, and finding count ride along as
+extra canonically-hashed fields. A recorded approval is tamper-evident the same way a backend
+dispatch already is.
+
+**What this is not.** It makes no confinement claim — recording a verdict from a given
+`--reviewer`/`--model` is not a guarantee that backend was actually sandboxed while producing
+it; that's on you when you choose the reviewer call (read-only flags, no write tools — see
+`codex-pipeline`). It also enforces no round caps, no client/confidentiality gate, and no
+"the builder wrote into a worktree, not the source tree" rule — those stay manual discipline,
+same as everywhere else in this project's client-repo workflow (draft the command, don't run
+it against source-of-truth files — see the `feedback_client_repo_prompt_not_execute` memory).
+
+Hermetic tests: `tests/loop-governance.mjs` (schema rules, snapshot fingerprinting +
+symlink-as-text + diff, and the full record/check binding lifecycle including plan-mutation,
+repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
 
 ## Known gaps (not blocking, worth knowing)
 
