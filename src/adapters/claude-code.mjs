@@ -13,7 +13,7 @@ export default {
     'claude', '-r', id, '-p', prompt, '--output-format', 'json',
     '--dangerously-skip-permissions',
   ],
-  env: ENV_BASE,
+  env: [...ENV_BASE, 'CLAUDE_CODE_OAUTH_TOKEN'],
   parse: (stdout) => parseJsonResult(stdout, { id: 'session_id', answer: 'result' }),
   checkCompaction: () => null,
 };
