@@ -167,16 +167,33 @@ function hashMalformedTail(line) {
     .digest('hex');
 }
 
-function previousHashFromTail(line) {
-  if (line === null) return GENESIS_ANCHOR;
+// Derives the predecessor hash for a new record from the bounded tail. In strict mode an
+// unusable tail (oversized or malformed) is a hard error rather than an opaque
+// discontinuity, so a caller that must not anchor onto unknown state can fail closed.
+function tailPreviousHash(tail, strict) {
+  if (tail.fallbackHash) {
+    if (strict) {
+      throw new Error(
+        'governance ledger tail exceeds the recovery window; refusing to append with an ' +
+        'unknown anchor',
+      );
+    }
+    return tail.fallbackHash;
+  }
+  if (tail.line === null) return GENESIS_ANCHOR;
   try {
-    const previous = JSON.parse(line);
+    const previous = JSON.parse(tail.line);
     if (typeof previous?.hash === 'string' && previous.hash.length > 0) return previous.hash;
   } catch {
     // A malformed tail is existing damage, not a reason to deny a new append.
   }
+  if (strict) {
+    throw new Error(
+      'governance ledger tail has no usable hash; refusing to append with an unknown anchor',
+    );
+  }
   warn('tail has no usable hash; appending without repairing or verifying prior entries');
-  return hashMalformedTail(line);
+  return hashMalformedTail(tail.line);
 }
 
 function extraFields(entry) {
@@ -227,6 +244,77 @@ function normalizeEntry(entry, previousHash) {
   };
 }
 
+// Resolve symlink aliases to the same resource before selecting its lock. Creating a
+// missing empty file publishes no event and makes dangling aliases resolvable too.
+function resolveLedgerPath() {
+  let ledgerPath;
+  try {
+    ledgerPath = realpathSync(LEDGER_PATH);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    closeSync(openSync(LEDGER_PATH, 'a', 0o600));
+    ledgerPath = realpathSync(LEDGER_PATH);
+  }
+  // Unlike symlinks, hard-link aliases have no unique canonical pathname. Do not silently
+  // use independent locks for the same inode through two names. Only regular files can be
+  // hard-linked; a non-file at LEDGER_PATH is left for the tail read to reject.
+  const stats = statSync(ledgerPath);
+  if (stats.isFile() && stats.nlink > 1) {
+    throw new Error('hard-linked ledger files are unsupported; use one path or symlink aliases');
+  }
+  return ledgerPath;
+}
+
+/**
+ * Runs fn while holding the ledger write lock, on the same lock path appendLedgerEntry
+ * uses. This lets a caller make a ledger append and a related read-modify-write atomic
+ * together, so concurrent records on one thread serialize instead of losing an update.
+ */
+export async function withLedgerLock(fn) {
+  const ledgerPath = resolveLedgerPath();
+  return withLock(fn, { lockPath: `${ledgerPath}.lock`, reclaimLive: false });
+}
+
+/**
+ * Appends a hash-chained record. MUST be called while holding the ledger lock (see
+ * withLedgerLock); it deliberately neither locks nor swallows errors. With strictTail, an
+ * unusable existing tail refuses instead of writing an opaque discontinuity.
+ */
+export function appendLedgerEntryLocked(entry, { strictTail = false } = {}) {
+  const ledgerPath = resolveLedgerPath();
+  let tail;
+  try {
+    tail = readLedgerTail(ledgerPath);
+  } catch (error) {
+    if (strictTail) {
+      throw new Error(
+        `governance ledger tail could not be read (${error.message}); refusing to append with ` +
+        'an unknown anchor',
+      );
+    }
+    // Failure to inspect existing state must not become a write gate. A conspicuous
+    // non-checkpoint link records the discontinuity for verifyLedger() to report.
+    warn(`tail could not be read (${error.message}); appending with an unknown anchor`);
+    tail = { line: null, needsSeparator: true };
+  }
+  const previousHash = isCheckpoint(entry)
+    ? GENESIS_ANCHOR
+    : tailPreviousHash(tail, strictTail);
+  const record = normalizeEntry(entry, previousHash);
+  record.hash = computeLedgerHash(record);
+  const separator = tail.needsSeparator ? '\n' : '';
+  const serialized = JSON.stringify(record);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_LEDGER_TAIL_BYTES - 2) {
+    throw new Error(`entry exceeds ${MAX_LEDGER_TAIL_BYTES - 2}-byte record limit`);
+  }
+  appendFileSync(ledgerPath, `${separator}${serialized}\n`, {
+    encoding: 'utf8',
+    flag: 'a',
+    mode: 0o600,
+  });
+  return record.hash;
+}
+
 // This function is intentionally best-effort and non-throwing. Callers should still await
 // it so the append finishes before their short-lived CLI process exits.
 export async function appendLedgerEntry(entry) {
@@ -234,51 +322,37 @@ export async function appendLedgerEntry(entry) {
     if (LEDGER_PATH_CONFIG_ERROR) {
       warn(`${LEDGER_PATH_CONFIG_ERROR}; using ${LEDGER_PATH}`);
     }
-    // Resolve symlink aliases to the same resource before selecting its lock.
-    // Creating a missing empty file publishes no event and makes dangling aliases
-    // resolvable too. Failure remains advisory in the outer catch.
-    let ledgerPath;
-    try {
-      ledgerPath = realpathSync(LEDGER_PATH);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      closeSync(openSync(LEDGER_PATH, 'a', 0o600));
-      ledgerPath = realpathSync(LEDGER_PATH);
-    }
-    // Unlike symlinks, hard-link aliases have no unique canonical pathname. Do
-    // not silently use independent locks for the same inode through two names.
-    if (statSync(ledgerPath).nlink > 1) {
-      throw new Error('hard-linked ledger files are unsupported; use one path or symlink aliases');
-    }
-    await withLock(() => {
-      let tail;
-      try {
-        tail = readLedgerTail(ledgerPath);
-      } catch (error) {
-        // Failure to inspect existing state must not become a write gate. A conspicuous
-        // non-checkpoint link records the discontinuity for verifyLedger() to report.
-        warn(`tail could not be read (${error.message}); appending with an unknown anchor`);
-        tail = { line: null, needsSeparator: true };
-      }
-      const previousHash = isCheckpoint(entry)
-        ? GENESIS_ANCHOR
-        : (tail.fallbackHash ?? previousHashFromTail(tail.line));
-      const record = normalizeEntry(entry, previousHash);
-      record.hash = computeLedgerHash(record);
-      const separator = tail.needsSeparator ? '\n' : '';
-      const serialized = JSON.stringify(record);
-      if (Buffer.byteLength(serialized, 'utf8') > MAX_LEDGER_TAIL_BYTES - 2) {
-        throw new Error(`entry exceeds ${MAX_LEDGER_TAIL_BYTES - 2}-byte record limit`);
-      }
-      appendFileSync(ledgerPath, `${separator}${serialized}\n`, {
-        encoding: 'utf8',
-        flag: 'a',
-        mode: 0o600,
-      });
-    }, { lockPath: `${ledgerPath}.lock`, reclaimLive: false });
+    return await withLedgerLock(() => appendLedgerEntryLocked(entry));
   } catch (error) {
     warn(`append failed: ${error?.message ?? String(error)}`);
+    return null;
   }
+}
+
+// Read-only accessor for governance consumers that need to resolve a specific
+// record (for example, an approval anchored by its hash). Parsing is deliberately
+// permissive: a malformed line is skipped here and reported by verifyLedger(), which
+// remains the single place that judges chain integrity.
+export function readLedgerEntries() {
+  let contents;
+  try {
+    contents = readFileSync(LEDGER_PATH, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  if (contents.length === 0) return [];
+  const lines = contents.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const entries = [];
+  for (const line of lines) {
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      // Intentionally ignored: integrity reporting belongs to verifyLedger().
+    }
+  }
+  return entries;
 }
 
 function report(totalEntries, intact, breakIndex = null, reason = null) {

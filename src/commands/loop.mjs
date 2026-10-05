@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { appendLedgerEntry } from '../governance/ledger.mjs';
 import { checkApproval, recordApproval, VERDICTS } from '../governance/approval.mjs';
 
 const RECORD_USAGE =
@@ -72,7 +71,7 @@ export async function cmdLoopRecord(thread, rest) {
 
   let record;
   try {
-    record = recordApproval({
+    record = await recordApproval({
       thread,
       planPath: flags.plan,
       repoPath: flags.repo,
@@ -85,26 +84,6 @@ export async function cmdLoopRecord(thread, rest) {
     process.exitCode = 1;
     return;
   }
-
-  // Best-effort, hash-chained alongside every real dispatch — a recorded verdict is
-  // tamper-evident the same way a backend dispatch is, without any change to the
-  // ledger's own schema (these land as extra canonically-hashed fields).
-  await appendLedgerEntry({
-    backend: record.reviewer,
-    thread,
-    mode: 'loop-review',
-    outcome: record.verdict.verdict.toLowerCase(),
-    exit_code: null,
-    tier: 1,
-    tier_name: 'read-only',
-    gate_allowed: record.verdict.verdict === 'APPROVED',
-    model: record.model,
-    plan_path: record.plan_path,
-    repo_path: record.repo_path,
-    plan_hash: record.plan_hash,
-    snapshot_fingerprint: record.snapshot_fingerprint,
-    finding_count: record.verdict.findings.length,
-  });
 
   const { manifest, ...summary } = record;
   console.log(JSON.stringify(summary, null, 2));
