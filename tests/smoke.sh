@@ -11,12 +11,27 @@
 # fake `agy` shimmed onto PATH (no real backend called), direct lock-module harnesses,
 # and a doctor gate check with stubbed binaries — those need no live backend at all.
 #
-# Backs up and restores your configured session map around the run so this is safe to
-# run any time without disturbing real thread state.
+# Runs against a throwaway HOME so it is safe to run any time without disturbing real
+# thread state: the real session map and governance ledger are never read, written, or
+# removed.
 #
 # Usage: ./tests/smoke.sh
 
 set -uo pipefail
+
+# Isolate the entire run in a fresh HOME before any cli-relay path is resolved.
+REAL_HOME="$HOME"
+SMOKE_HOME=$(mktemp -d /tmp/cli-relay-smoke-home.XXXXXX) || {
+  echo "failed to create isolated smoke home" >&2
+  exit 1
+}
+export HOME="$SMOKE_HOME"
+trap 'rm -rf "$SMOKE_HOME"' EXIT
+if [ "$SMOKE_HOME" = "$REAL_HOME" ]; then
+  echo "refusing to run: isolated smoke home equals the real home ($REAL_HOME)" >&2
+  exit 1
+fi
+
 ROUTE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/cli-relay.mjs"
 CONFIG_MODULE="$(dirname "$ROUTE")/src/config.mjs"
 if ! MAP=$(node --input-type=module -e '
@@ -37,21 +52,21 @@ if ! LEDGER=$(node --input-type=module -e '
   exit 1
 fi
 [ -n "$LEDGER" ] || { echo "configured cli-relay governance ledger is empty" >&2; exit 1; }
-BACKUP="$MAP.smoke-backup.$$"
-LEDGER_BACKUP="$LEDGER.smoke-backup.$$"
+
+# Both resolved paths must live inside the throwaway home. If either escapes, abort
+# before anything is written or removed — this run must never touch the real home.
+case "$MAP" in
+  "$SMOKE_HOME"/*) ;;
+  *) echo "refusing to run: session map $MAP is outside the isolated home $SMOKE_HOME" >&2; exit 1 ;;
+esac
+case "$LEDGER" in
+  "$SMOKE_HOME"/*) ;;
+  *) echo "refusing to run: governance ledger $LEDGER is outside the isolated home $SMOKE_HOME" >&2; exit 1 ;;
+esac
+
 PASS=0
 FAIL=0
 
-restore_map() {
-  rm -rf "$MAP" "$MAP.lock"
-  rm -f "$LEDGER"
-  [ -f "$BACKUP" ] && mv "$BACKUP" "$MAP"
-  [ -f "$LEDGER_BACKUP" ] && mv "$LEDGER_BACKUP" "$LEDGER"
-}
-trap restore_map EXIT
-
-[ -f "$MAP" ] && cp "$MAP" "$BACKUP"
-[ -f "$LEDGER" ] && cp "$LEDGER" "$LEDGER_BACKUP"
 rm -rf "$MAP" "$MAP.lock"
 rm -f "$LEDGER"
 
@@ -72,6 +87,7 @@ check "list on empty map" 0 "$code"
 echo "$out" | grep -q "no threads recorded" && echo "PASS: empty-map message correct" && PASS=$((PASS+1)) || { echo "FAIL: empty-map message wrong: $out"; FAIL=$((FAIL+1)); }
 
 echo
+if [ "${CLI_RELAY_SMOKE_LIVE:-0}" = 1 ]; then
 echo "== fresh + resume against agy (real call, real context retention check) =="
 fresh_out=$(node "$ROUTE" agy smoke-thread fresh "Reply with exactly: PONG"); fresh_code=$?
 check "agy fresh" 0 "$fresh_code"
@@ -132,6 +148,9 @@ check "reset on a pinned thread still succeeds" 0 "$reset_warn_code"
 echo "$reset_warn_out" | grep -q "will be destroyed by reset" && echo "PASS: reset warns before destroying pins" && PASS=$((PASS+1)) || { echo "FAIL: reset did not warn about pins: $reset_warn_out"; FAIL=$((FAIL+1)); }
 
 echo
+else
+echo "SKIP: live agy checks (set CLI_RELAY_SMOKE_LIVE=1 to run them against a real agy login)"
+fi
 echo "== circuit breaker: seed 2 prior failures, live-fire the 3rd against codex with a bad id =="
 cat > "$MAP" << 'EOF'
 {"version":1,"sessions":{"circuit-smoke":{"backend":"codex","native_session_id":"00000000-0000-0000-0000-000000000000","confirmed":true,"status":"ready","last_run_iso":"2026-01-01T00:00:00.000Z","last_exit_code":1,"consecutive_resume_failures":2}}}
