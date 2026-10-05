@@ -47,6 +47,10 @@ export default {
     }
     return { id, answer };
   },
+  classifyFailure(out, err) {
+    return [...out.split('\n'), ...err.split('\n')]
+      .some((line) => line.startsWith('ERROR: {'));
+  },
   checkCompaction(id) {
     if (!id) return false;
     const file = findRolloutFile(id);

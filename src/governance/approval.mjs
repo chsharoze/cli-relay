@@ -24,8 +24,9 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { STATE_DIR } from '../config.mjs';
+import { RelayError } from '../core/errors.mjs';
 import {
   appendLedgerEntryLocked, canonicalStringify, computeLedgerHash, readLedgerEntries,
   verifyLedger, withLedgerLock,
@@ -136,13 +137,38 @@ export function assertValidVerdict(verdict) {
 }
 
 /**
+ * Normalizes a `--files` scope into a stable, order-independent list of repo-relative
+ * paths. An absent/empty scope means "the whole tree" and is represented as an empty
+ * array, so whole-tree records keep their existing fingerprint behaviour.
+ */
+function normalizeScope(files) {
+  if (!Array.isArray(files)) return [];
+  const names = new Set();
+  for (const value of files) {
+    if (typeof value !== 'string') continue;
+    const normalized = value.trim().replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+$/, '');
+    // "." (and "./", which normalizes to "") means the whole tree, not a path that
+    // happens to resolve to nothing. Left as a literal it would walk an empty scope and
+    // produce the fingerprint of an empty manifest, which no on-disk change can alter.
+    if (normalized === '.') return [];
+    if (normalized.length > 0) names.add(normalized);
+  }
+  return [...names].sort();
+}
+
+/**
  * Fingerprints a directory tree deterministically: every regular file's content hash,
  * every symlink's literal target (never followed, mirroring claudex-loop's snapshot),
  * combined into one canonical-JSON manifest and hashed. Same manifest shape in, same
  * fingerprint out — order of traversal never matters because the manifest is sorted
  * before hashing (canonicalStringify, shared with the governance ledger).
+ *
+ * When `files` is a non-empty list of repo-relative paths, only those paths are walked,
+ * keyed by their relative path; a listed path that no longer exists simply contributes no
+ * manifest entry, so its removal still changes the fingerprint. An empty/absent `files`
+ * walks the whole tree exactly as before.
  */
-export function snapshotTree(rootPath, { exclude = DEFAULT_SNAPSHOT_EXCLUDES } = {}) {
+export function snapshotTree(rootPath, { exclude = DEFAULT_SNAPSHOT_EXCLUDES, files } = {}) {
   const root = resolve(rootPath);
   if (!existsSync(root)) {
     throw new Error(`snapshot target does not exist: ${root}`);
@@ -150,24 +176,40 @@ export function snapshotTree(rootPath, { exclude = DEFAULT_SNAPSHOT_EXCLUDES } =
   const excludeSet = new Set(exclude);
   const manifest = {};
 
+  const recordEntry = (fullPath, relPath) => {
+    const stat = lstatSync(fullPath);
+    if (stat.isSymbolicLink()) {
+      manifest[relPath] = `symlink:${readlinkSync(fullPath)}`;
+    } else if (stat.isDirectory()) {
+      walk(fullPath);
+    } else if (stat.isFile()) {
+      manifest[relPath] = `file:${sha256Hex(readFileSync(fullPath))}`;
+    }
+    // Other types (sockets, fifos, devices) are deliberately not fingerprinted;
+    // they aren't reviewable source content.
+  };
+
   const walk = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (excludeSet.has(entry.name)) continue;
       const fullPath = join(dir, entry.name);
       const relPath = relative(root, fullPath).split('\\').join('/');
-      const stat = lstatSync(fullPath);
-      if (stat.isSymbolicLink()) {
-        manifest[relPath] = `symlink:${readlinkSync(fullPath)}`;
-      } else if (stat.isDirectory()) {
-        walk(fullPath);
-      } else if (stat.isFile()) {
-        manifest[relPath] = `file:${sha256Hex(readFileSync(fullPath))}`;
-      }
-      // Other types (sockets, fifos, devices) are deliberately not fingerprinted;
-      // they aren't reviewable source content.
+      recordEntry(fullPath, relPath);
     }
   };
-  walk(root);
+
+  const scope = normalizeScope(files);
+  if (scope.length === 0) {
+    walk(root);
+  } else {
+    for (const relPath of scope) {
+      const fullPath = resolve(root, relPath);
+      const rel = relative(root, fullPath);
+      if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) continue;
+      if (!existsSync(fullPath)) continue; // a removed listed path is a fingerprint change
+      recordEntry(fullPath, rel.split('\\').join('/'));
+    }
+  }
 
   return {
     fingerprint: sha256Hex(canonicalStringify(manifest)),
@@ -336,6 +378,10 @@ function anchorViolation(ledgerByHash, { thread, record }) {
     return `approval anchor ${hash} records repo path ${JSON.stringify(entry.repo_path ?? null)}, ` +
       `not ${JSON.stringify(record.repo_path ?? null)}`;
   }
+  if (normalizeScope(entry.files).join('\u0000') !== normalizeScope(record.files).join('\u0000')) {
+    return `approval anchor ${hash} records files scope ${JSON.stringify(entry.files ?? null)}, ` +
+      `not ${JSON.stringify(record.files ?? null)}`;
+  }
   if ((entry.approval_verdict ?? null) !== (record.verdict?.verdict ?? null)) {
     return `approval anchor ${hash} records verdict ${JSON.stringify(entry.approval_verdict ?? null)}, ` +
       `not "${record.verdict?.verdict ?? 'unknown'}"`;
@@ -360,6 +406,7 @@ export async function recordApproval({
   model = null,
   verdict,
   snapshotExclude,
+  files,
 }) {
   if (!thread || typeof thread !== 'string') throw new Error('thread is required');
   if (!reviewer || typeof reviewer !== 'string') throw new Error('reviewer is required');
@@ -368,8 +415,20 @@ export async function recordApproval({
   const resolvedPlanPath = resolve(planPath);
   if (!existsSync(resolvedPlanPath)) throw new Error(`plan not found: ${resolvedPlanPath}`);
   const resolvedRepoPath = resolve(repoPath);
+  const scope = normalizeScope(files);
   const planHash = sha256Hex(readFileSync(resolvedPlanPath));
-  const snapshot = snapshotTree(resolvedRepoPath, { exclude: snapshotExclude });
+  const snapshot = snapshotTree(resolvedRepoPath, { exclude: snapshotExclude, files: scope });
+  // A non-empty scope that matches no files hashes an empty manifest — a fingerprint no
+  // change to the repo can ever move. Refuse rather than record an approval that can
+  // never catch a later edit. (An empty scope is the whole tree, handled above.)
+  if (scope.length > 0 && snapshot.fileCount === 0) {
+    throw new RelayError(
+      'EMPTY_FILE_SCOPE',
+      `--files scope matched no files under ${resolvedRepoPath} (${scope.join(', ')}) — ` +
+      'refusing to record an approval whose fingerprint would cover nothing',
+      { exitCode: 2 },
+    );
+  }
 
   const ledgerEntry = {
     backend: reviewer,
@@ -388,6 +447,7 @@ export async function recordApproval({
     plan_hash: planHash,
     snapshot_fingerprint: snapshot.fingerprint,
     finding_count: Array.isArray(verdict.findings) ? verdict.findings.length : 0,
+    ...(scope.length > 0 ? { files: scope } : {}),
   };
 
   // The ledger append and the approvals read-modify-write share one lock, so two
@@ -414,6 +474,7 @@ export async function recordApproval({
       snapshot_fingerprint: snapshot.fingerprint,
       file_count: snapshot.fileCount,
       manifest: snapshot.manifest,
+      files: scope,
       verdict,
       recorded_at: new Date().toISOString(),
       ledger_hash: ledgerHash,
@@ -479,6 +540,74 @@ export function missingApprovalAnchors() {
 }
 
 /**
+ * Best-effort listing of every thread that has at least one recorded approval, keyed to
+ * its newest record. Used by `cli-relay list` to surface loop-only threads — ones with an
+ * approval but no session. A missing, unsupported, or corrupt approvals.json yields an
+ * empty list rather than throwing, so listing sessions never depends on the store being
+ * readable.
+ */
+export function listLoopThreads() {
+  let store;
+  try {
+    store = loadApprovals();
+  } catch {
+    return [];
+  }
+  const threads = [];
+  for (const [thread, raw] of Object.entries(store.approvals ?? {})) {
+    let entries;
+    try {
+      entries = allThreadRecords(raw);
+    } catch {
+      continue;
+    }
+    if (entries.length === 0) continue;
+    const record = newestRecord(entries.map(({ record: value }) => value));
+    threads.push({
+      thread,
+      reviewer: record.reviewer ?? null,
+      model: record.model ?? null,
+      verdict: record.verdict?.verdict ?? null,
+      recorded_at: record.recorded_at ?? null,
+    });
+  }
+  return threads.sort((a, b) => a.thread.localeCompare(b.thread));
+}
+
+/**
+ * Lists loop-review ledger entries whose approval verdict no approval record references.
+ * These are the mirror of `missingApprovalAnchors`: the ledger line survived but the
+ * approvals store no longer points at it (for example, a save that failed after the
+ * ledger append). Identified by `mode === 'loop-review'` plus `approval_verdict`, so an
+ * ordinary dispatch entry can never be mistaken for an orphaned approval.
+ */
+export function orphanedApprovalEntries() {
+  const referenced = new Set();
+  for (const raw of Object.values(loadApprovals().approvals ?? {})) {
+    for (const { record } of allThreadRecords(raw)) {
+      if (typeof record.ledger_hash === 'string' && record.ledger_hash.length > 0) {
+        referenced.add(record.ledger_hash);
+      }
+    }
+  }
+  const orphaned = [];
+  for (const entry of readLedgerEntries()) {
+    if (entry?.mode !== 'loop-review') continue;
+    if (typeof entry.approval_verdict !== 'string' || entry.approval_verdict.length === 0) continue;
+    if (typeof entry.hash !== 'string' || referenced.has(entry.hash)) continue;
+    orphaned.push({
+      hash: entry.hash,
+      thread: entry.thread ?? null,
+      reviewer: entry.reviewer ?? entry.backend ?? null,
+      model: entry.model ?? null,
+      approval_verdict: entry.approval_verdict,
+      timestamp: entry.timestamp ?? null,
+    });
+  }
+  return orphaned;
+}
+
+/**
  * Re-verifies a recorded approval against what's on disk right now. Mirrors
  * claudex-loop's check_approval: status must be APPROVED, and the plan hash + exact
  * repo/plan paths must still match. Adds the snapshot recheck claudex-loop's binding
@@ -540,7 +669,31 @@ function checkApprovalUnsafe({ thread, planPath, repoPath, snapshotExclude } = {
   }
 
   const currentPlanHash = sha256Hex(readFileSync(resolvedPlanPath));
-  const currentSnapshot = snapshotTree(resolvedRepoPath, { exclude: snapshotExclude });
+
+  // Every record that still binds this exact plan/repo bytes is a candidate. They must all
+  // agree on the files scope: a record is fingerprinted against its own stored scope, so
+  // mixing scopes on one thread would let a change unlisted by one scope slip past it.
+  const candidates = entries.filter(({ record }) =>
+    record.plan_path === resolvedPlanPath &&
+    record.repo_path === resolvedRepoPath &&
+    record.plan_hash === currentPlanHash);
+  const scopeKeys = new Map();
+  for (const { record } of candidates) {
+    const scope = normalizeScope(record.files);
+    scopeKeys.set(scope.join('\u0000'), scope);
+  }
+  if (scopeKeys.size > 1) {
+    const labels = [...scopeKeys.values()]
+      .map((scope) => (scope.length === 0 ? '<whole tree>' : scope.join(', ')));
+    return {
+      allowed: false,
+      reason: `records on thread "${thread}" disagree on their --files scope ` +
+        `(${labels.join(' vs ')}); re-record every verdict with the same scope`,
+      record: reference,
+    };
+  }
+  const scope = candidates.length > 0 ? normalizeScope(candidates[0].record.files) : [];
+  const currentSnapshot = snapshotTree(resolvedRepoPath, { exclude: snapshotExclude, files: scope });
 
   const current = [];
   const stale = [];
@@ -549,6 +702,7 @@ function checkApprovalUnsafe({ thread, planPath, repoPath, snapshotExclude } = {
     const isCurrent = record.plan_path === resolvedPlanPath &&
       record.repo_path === resolvedRepoPath &&
       record.plan_hash === currentPlanHash &&
+      normalizeScope(record.files).join('\u0000') === scope.join('\u0000') &&
       record.snapshot_fingerprint === currentSnapshot.fingerprint;
     (isCurrent ? current : stale).push(entry);
   }

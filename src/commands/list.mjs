@@ -1,5 +1,6 @@
 import { MAP_PATH } from '../config.mjs';
 import { loadMap } from '../core/map-store.mjs';
+import { listLoopThreads } from '../governance/approval.mjs';
 
 function truncId(id, max = 24) {
   if (id == null) return '-';
@@ -7,10 +8,17 @@ function truncId(id, max = 24) {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+function formatLoopThread(entry) {
+  const reviewer = entry.model ? `${entry.reviewer ?? '?'} (${entry.model})` : (entry.reviewer ?? '?');
+  return `  ${entry.thread}  ${entry.verdict ?? '-'}  ${reviewer}  ${entry.recorded_at ?? '-'}`;
+}
+
 export function cmdList() {
   const map = loadMap();
   const names = Object.keys(map.sessions);
-  if (names.length === 0) {
+  // Best-effort: a corrupt approvals.json returns [] rather than breaking session listing.
+  const loopOnly = listLoopThreads().filter((entry) => !names.includes(entry.thread));
+  if (names.length === 0 && loopOnly.length === 0) {
     console.log(`no threads recorded in ${MAP_PATH}`);
     return;
   }
@@ -37,16 +45,23 @@ export function cmdList() {
       pins: session.pinned_facts?.length ?? 0,
     };
   });
-  const widths = Object.fromEntries(
-    columns.map((column) => [
-      column,
-      Math.max(column.length, ...rows.map((row) => String(row[column]).length)),
-    ]),
-  );
-  const formatRow = (values) => columns
-    .map((column) => String(values[column]).padEnd(widths[column]))
-    .join('  ');
-  console.log(formatRow(Object.fromEntries(columns.map((column) => [column, column]))));
-  console.log(columns.map((column) => '-'.repeat(widths[column])).join('  '));
-  for (const row of rows) console.log(formatRow(row));
+  if (rows.length > 0) {
+    const widths = Object.fromEntries(
+      columns.map((column) => [
+        column,
+        Math.max(column.length, ...rows.map((row) => String(row[column]).length)),
+      ]),
+    );
+    const formatRow = (values) => columns
+      .map((column) => String(values[column]).padEnd(widths[column]))
+      .join('  ');
+    console.log(formatRow(Object.fromEntries(columns.map((column) => [column, column]))));
+    console.log(columns.map((column) => '-'.repeat(widths[column])).join('  '));
+    for (const row of rows) console.log(formatRow(row));
+  }
+  if (loopOnly.length > 0) {
+    if (rows.length > 0) console.log('');
+    console.log('loop-only threads (approval recorded, no session):');
+    for (const entry of loopOnly) console.log(formatLoopThread(entry));
+  }
 }

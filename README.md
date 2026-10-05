@@ -60,8 +60,11 @@ cli-relay pin <thread> "<fact>"
 cli-relay unpin <thread> <index>
 cli-relay pins <thread>
 cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> \
-  --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]
-cli-relay loop check <thread> [--plan <path>] [--repo <path>]
+  --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] \
+  [--files <path,path>] [--quiet] [...]
+cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> \
+  --verdict-file <path> [--model <model>] [--files <path,path>] [--quiet]
+cli-relay loop check <thread> [--plan <path>] [--repo <path>] [--quiet]
 ```
 
 Backends: `codex`, `agy`, `claude-code`, `command-code` (command-code is fresh-only —
@@ -162,6 +165,16 @@ written JSON records are limited to 1,048,574 UTF-8 bytes (excluding the newline
 every supported record fits the recovery window. Oversized records warn and are not
 written; they never fail the backend dispatch. An existing oversized tail is not
 silently repaired or certified. There is still no retention cap on the ledger itself.
+
+Ordinary dispatch ledger appends are deliberately **non-strict**: an unreadable or
+oversized tail does not block the append — it continues with a discontinuity that
+`cli-relay audit verify` (`verifyLedger`) reports, so a damaged ledger can never wedge a
+backend call. Approval recording is the one strict writer: it fails closed on an
+unreadable or oversized tail rather than anchoring an approval onto an unknown
+predecessor. The hash chain detects edits to any entry and a break in the middle of the
+chain, but a fully rewritten chain that recomputes a self-consistent `previous_hash`/`hash`
+sequence from genesis is not detected by the chain alone — that requires an external
+anchor (a published checkpoint or signature) the ledger does not currently keep.
 
 The tier gate has an isolated optional config at
 `~/.cli-relay/governance/tier-gate.json`. The supported override is a version-1 object with
@@ -571,9 +584,26 @@ hash-chains — the reviewer is one of your four backends, picked per call, same
 ```
 cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> \
   --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] \
-  [--coverage "<text>"] [--limitations "<text>"] [--findings <json-or-@file>]
-cli-relay loop check <thread> [--plan <path>] [--repo <path>]
+  [--files <path,path>] [--coverage "<text>"] [--limitations "<text>"] \
+  [--findings <json-or-@file>] [--quiet]
+cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> \
+  --verdict-file <path> [--model <model>] [--files <path,path>] [--quiet]
+cli-relay loop check <thread> [--plan <path>] [--repo <path>] [--quiet]
 ```
+
+`--verdict-file <path>` reads the verdict as JSON from a file instead of building it from
+flags. It is mutually exclusive with `--verdict`/`--summary`/`--findings`/`--coverage`/
+`--limitations` (exit 2 if combined). A missing file or unparseable JSON is exit 2; a file
+that parses but fails the verdict schema is exit 1 with the validation errors joined by
+`'; '`. `--files a,b,c` restricts the tree fingerprint to the comma-separated repo-relative
+paths (whole-tree when omitted); every record on one thread must share one scope, and
+`loop check` denies if a thread's records disagree. `--quiet` prints a single line —
+`recorded <VERDICT> for <thread>` on record, or `approved` / `denied: <reason>` on check —
+instead of the full JSON object.
+
+An approval recorded before 1.2.0 predates both `--files` scoping and the current
+anchoring rules; it must be re-recorded with `cli-relay loop record` rather than trusted
+as-is.
 
 **Who picks the reviewer and model:** `--reviewer` names the cli-relay backend that produced
 the verdict (`codex`, `claude-code`, `agy`, `command-code`) and `--model` optionally records

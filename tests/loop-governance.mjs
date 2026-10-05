@@ -529,6 +529,285 @@ console.log(JSON.stringify({ allowed: result.allowed, reason: result.reason }));
     assert.ok(result.reason.length > 0, 'a denial from a corrupt store must carry a reason');
     console.log('PASS: (k) corrupt approvals.json denies with a reason and does not throw');
   }
+
+  // --- T2: scoped fingerprint via --files ---
+  {
+    const thread = 'thread-scoped-files';
+    const planT2 = join(scratch, 'plan-t2.md');
+    writeFileSync(planT2, '# plan t2\n');
+    const repoT2 = join(scratch, 'repo-t2');
+    mkdirSync(join(repoT2, 'sub'), { recursive: true });
+    writeFileSync(join(repoT2, 'a.py'), 'print(1)\n');
+    writeFileSync(join(repoT2, 'sub', 'b.py'), 'print(2)\n');
+
+    await recordApproval({
+      thread, planPath: planT2, repoPath: repoT2, reviewer: 'codex', model: 'm1',
+      files: ['a.py'],
+      verdict: { verdict: 'APPROVED', summary: 'ok', findings: [], coverage: 'a.py' },
+    });
+
+    // A change outside the reviewed scope must not invalidate the approval.
+    writeFileSync(join(repoT2, 'sub', 'b.py'), 'print(999)\n');
+    assert.equal(
+      checkApproval({ thread, planPath: planT2, repoPath: repoT2 }).allowed,
+      true,
+      'an unlisted change must keep the approval allowed',
+    );
+
+    // A change to a listed file must invalidate it.
+    writeFileSync(join(repoT2, 'a.py'), 'print(1000)\n');
+    const denied = checkApproval({ thread, planPath: planT2, repoPath: repoT2 });
+    assert.equal(denied.allowed, false);
+    assert.match(denied.reason, /repository tree has changed/);
+    console.log('PASS: T2 scoped fingerprint — unlisted change ignored, listed change denies');
+  }
+
+  // --- T2: a thread whose records disagree on --files scope denies ---
+  {
+    const thread = 'thread-mixed-scope';
+    const planT2b = join(scratch, 'plan-t2b.md');
+    writeFileSync(planT2b, '# plan t2b\n');
+    const repoT2b = join(scratch, 'repo-t2b');
+    mkdirSync(repoT2b);
+    writeFileSync(join(repoT2b, 'a.py'), 'print(1)\n');
+    writeFileSync(join(repoT2b, 'b.py'), 'print(2)\n');
+
+    const approved = { verdict: 'APPROVED', summary: 'ok', findings: [], coverage: 'all' };
+    await recordApproval({
+      thread, planPath: planT2b, repoPath: repoT2b, reviewer: 'codex', model: 'm1',
+      files: ['a.py'], verdict: approved,
+    });
+    await recordApproval({
+      thread, planPath: planT2b, repoPath: repoT2b, reviewer: 'claude-code', model: null,
+      files: ['b.py'], verdict: approved,
+    });
+
+    const result = checkApproval({ thread, planPath: planT2b, repoPath: repoT2b });
+    assert.equal(result.allowed, false);
+    assert.match(result.reason, /scope/);
+    console.log('PASS: T2 mixed-scope thread denies');
+  }
+
+  // --- FIX 1: --files . is the whole tree, not an empty scope ---
+  {
+    const thread = 'thread-files-dot';
+    const planDot = join(scratch, 'plan-dot.md');
+    writeFileSync(planDot, '# plan dot\n');
+    const repoDot = join(scratch, 'repo-dot');
+    mkdirSync(repoDot);
+    writeFileSync(join(repoDot, 'a.py'), 'print(1)\n');
+    writeFileSync(join(repoDot, 'b.py'), 'print(2)\n');
+
+    await recordApproval({
+      thread, planPath: planDot, repoPath: repoDot, reviewer: 'codex', model: 'm1',
+      files: ['.'],
+      verdict: { verdict: 'APPROVED', summary: 'ok', findings: [], coverage: 'all' },
+    });
+    const stored = getApproval(thread);
+    assert.deepEqual(stored.files, [], "'.' must normalize to the whole-tree scope");
+    assert.equal(stored.file_count, 2, "'.' must fingerprint the whole tree, not nothing");
+    assert.equal(checkApproval({ thread, planPath: planDot, repoPath: repoDot }).allowed, true);
+
+    // With the fix, '.' is the whole tree: a change to any repo file must deny.
+    writeFileSync(join(repoDot, 'b.py'), 'print(999)\n');
+    const denied = checkApproval({ thread, planPath: planDot, repoPath: repoDot });
+    assert.equal(denied.allowed, false);
+    assert.match(denied.reason, /repository tree has changed/);
+    console.log('PASS: FIX 1 --files . is the whole tree; a later change denies');
+  }
+
+  // --- FIX 1: a scoped walk matching zero files refuses the record with exit 2 ---
+  {
+    const { cmdLoopRecord } = await import('../src/commands/loop.mjs');
+    const planZero = join(scratch, 'plan-zero.md');
+    writeFileSync(planZero, '# plan zero\n');
+    const repoZero = join(scratch, 'repo-zero');
+    mkdirSync(repoZero);
+    writeFileSync(join(repoZero, 'a.py'), 'print(1)\n');
+
+    const errors = [];
+    const original = console.error;
+    console.error = (...args) => errors.push(args.join(' '));
+    process.exitCode = 0;
+    try {
+      await cmdLoopRecord('thread-zero-scope', [
+        '--plan', planZero, '--repo', repoZero, '--reviewer', 'codex',
+        '--files', 'does-not-exist.py',
+        '--verdict', 'APPROVED', '--summary', 'ok', '--coverage', 'all',
+      ]);
+    } finally {
+      console.error = original;
+    }
+    assert.equal(process.exitCode, 2, 'an empty scoped walk must exit 2');
+    assert.ok(errors.some((line) => /matched no files/.test(line)), errors.join('\n'));
+    assert.equal(getApproval('thread-zero-scope'), null, 'nothing may be recorded');
+    console.log('PASS: FIX 1 a --files scope matching zero files refuses with exit 2');
+  }
+
+  // --- T3: --verdict-file input and its exit codes ---
+  {
+    const { cmdLoopRecord } = await import('../src/commands/loop.mjs');
+    const planT3 = join(scratch, 'plan-t3.md');
+    writeFileSync(planT3, '# plan t3\n');
+    const repoT3 = join(scratch, 'repo-t3');
+    mkdirSync(repoT3);
+    writeFileSync(join(repoT3, 'a.py'), 'print(1)\n');
+
+    const captureErrors = async (fn) => {
+      const errors = [];
+      const original = console.error;
+      console.error = (...args) => errors.push(args.join(' '));
+      try { await fn(); } finally { console.error = original; }
+      return errors;
+    };
+
+    // A valid verdict file records.
+    const goodFile = join(scratch, 'verdict-good.json');
+    writeFileSync(goodFile, `${JSON.stringify({
+      verdict: 'APPROVED', summary: 'file ok', findings: [], coverage: 'all',
+    })}\n`);
+    process.exitCode = 0;
+    await captureErrors(() => cmdLoopRecord('thread-verdict-file', [
+      '--plan', planT3, '--repo', repoT3, '--reviewer', 'codex', '--verdict-file', goodFile,
+    ]));
+    assert.equal(process.exitCode ?? 0, 0, 'a valid verdict file must record with exit 0');
+    assert.ok(getApproval('thread-verdict-file'), 'the file verdict must be recorded');
+    assert.equal(getApproval('thread-verdict-file').verdict.verdict, 'APPROVED');
+
+    // A parseable file that fails the schema exits 1 and records nothing.
+    const badFile = join(scratch, 'verdict-bad.json');
+    writeFileSync(badFile, `${JSON.stringify({
+      verdict: 'APPROVED',
+      summary: 'bad',
+      coverage: 'all',
+      findings: [{ id: 'f1', severity: 'high', description: 'x' }],
+    })}\n`);
+    process.exitCode = 0;
+    const badErrors = await captureErrors(() => cmdLoopRecord('thread-verdict-bad', [
+      '--plan', planT3, '--repo', repoT3, '--reviewer', 'codex', '--verdict-file', badFile,
+    ]));
+    assert.equal(process.exitCode, 1, 'an invalid verdict file must exit 1');
+    assert.ok(badErrors.some((line) => /cannot contradict its own findings/.test(line)));
+    assert.equal(getApproval('thread-verdict-bad'), null);
+
+    // A missing file exits 2.
+    process.exitCode = 0;
+    await captureErrors(() => cmdLoopRecord('thread-verdict-missing', [
+      '--plan', planT3, '--repo', repoT3, '--reviewer', 'codex',
+      '--verdict-file', join(scratch, 'does-not-exist.json'),
+    ]));
+    assert.equal(process.exitCode, 2, 'a missing verdict file must exit 2');
+
+    // --verdict-file combined with --verdict exits 2.
+    process.exitCode = 0;
+    await captureErrors(() => cmdLoopRecord('thread-verdict-conflict', [
+      '--plan', planT3, '--repo', repoT3, '--reviewer', 'codex',
+      '--verdict-file', goodFile, '--verdict', 'APPROVED',
+    ]));
+    assert.equal(process.exitCode, 2, '--verdict-file combined with --verdict must exit 2');
+    console.log('PASS: T3 --verdict-file records; invalid=1, missing=2, conflict=2');
+  }
+
+  // --- T4: --quiet prints exactly one line for record and check ---
+  {
+    const { cmdLoopRecord, cmdLoopCheck } = await import('../src/commands/loop.mjs');
+    const planT4 = join(scratch, 'plan-t4.md');
+    writeFileSync(planT4, '# plan t4\n');
+    const repoT4 = join(scratch, 'repo-t4');
+    mkdirSync(repoT4);
+    writeFileSync(join(repoT4, 'a.py'), 'print(1)\n');
+
+    const captureLogs = async (fn) => {
+      const logs = [];
+      const original = console.log;
+      console.log = (...args) => logs.push(args.join(' '));
+      try { await fn(); } finally { console.log = original; }
+      return logs;
+    };
+
+    process.exitCode = 0;
+    const recordLines = await captureLogs(() => cmdLoopRecord('thread-quiet', [
+      '--plan', planT4, '--repo', repoT4, '--reviewer', 'codex',
+      '--verdict', 'APPROVED', '--summary', 'ok', '--coverage', 'all', '--quiet',
+    ]));
+    assert.deepEqual(recordLines, ['recorded APPROVED for thread-quiet']);
+
+    process.exitCode = 0;
+    const approveLines = await captureLogs(() => cmdLoopCheck('thread-quiet', ['--quiet']));
+    assert.deepEqual(approveLines, ['approved']);
+    assert.equal(process.exitCode, 0);
+
+    // A denied check prints one `denied: <reason>` line and exits 1.
+    process.exitCode = 0;
+    const denyLines = await captureLogs(() => cmdLoopCheck('no-such-quiet-thread', ['--quiet']));
+    assert.equal(denyLines.length, 1);
+    assert.match(denyLines[0], /^denied: /);
+    assert.equal(process.exitCode, 1);
+    console.log('PASS: T4 --quiet prints one line for record and check');
+  }
+
+  // --- T4: cli-relay list shows loop-only threads and survives a corrupt store ---
+  {
+    const { cmdList } = await import('../src/commands/list.mjs');
+    const captureLogs = async (fn) => {
+      const logs = [];
+      const original = console.log;
+      console.log = (...args) => logs.push(args.join(' '));
+      try { await fn(); } finally { console.log = original; }
+      return logs;
+    };
+
+    const lines = await captureLogs(() => cmdList());
+    assert.ok(lines.some((line) => /loop-only threads/.test(line)), 'loop-only section must print');
+    assert.ok(
+      lines.some((line) => line.includes('thread-quiet')),
+      'a loop-only thread must appear in list output',
+    );
+
+    const saved = readFileSync(APPROVALS_PATH, 'utf8');
+    try {
+      writeFileSync(APPROVALS_PATH, 'this is not valid json\n');
+      const corruptLines = await captureLogs(() => cmdList());
+      assert.ok(corruptLines.length > 0, 'list must still produce output with a corrupt store');
+    } finally {
+      writeFileSync(APPROVALS_PATH, saved);
+    }
+    console.log('PASS: T4 list shows loop-only threads and tolerates a corrupt approvals store');
+  }
+
+  // --- T6: orphaned loop-review ledger entry reported after its approval is removed ---
+  {
+    const thread = 'thread-orphan';
+    const planT6 = join(scratch, 'plan-t6.md');
+    writeFileSync(planT6, '# plan t6\n');
+    const repoT6 = join(scratch, 'repo-t6');
+    mkdirSync(repoT6);
+    writeFileSync(join(repoT6, 'a.py'), 'print(1)\n');
+
+    const rec = await recordApproval({
+      thread, planPath: planT6, repoPath: repoT6, reviewer: 'codex', model: 'm1',
+      verdict: { verdict: 'APPROVED', summary: 'ok', findings: [], coverage: 'all' },
+    });
+    // Simulate a failed approvals save: drop the record, keep its ledger line.
+    const store = JSON.parse(readFileSync(APPROVALS_PATH, 'utf8'));
+    delete store.approvals[thread];
+    writeFileSync(APPROVALS_PATH, `${JSON.stringify(store, null, 2)}\n`);
+
+    const { cmdAuditVerify } = await import('../src/commands/audit.mjs');
+    const original = console.log;
+    let report;
+    console.log = () => {};
+    try { report = cmdAuditVerify(); } finally { console.log = original; }
+
+    assert.ok(Array.isArray(report.orphanedApprovalEntries));
+    const orphan = report.orphanedApprovalEntries.find((entry) => entry.hash === rec.ledger_hash);
+    assert.ok(orphan, 'the orphaned loop-review ledger line must be reported');
+    assert.equal(orphan.thread, thread);
+    assert.equal(orphan.approval_verdict, 'APPROVED');
+    console.log('PASS: T6 orphaned loop-review ledger entry reported after approval removal');
+  }
+
+  process.exitCode = 0;
 } finally {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;

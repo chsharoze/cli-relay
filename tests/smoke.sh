@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # smoke.sh — repeatable regression check for cli-relay.mjs.
 #
-# Exercises the real router against real backends (not mocks) — agy is used for anything
-# that costs money-per-call, since agy is free/cheap; codex is used only for the fast-fail
-# scenarios (bad resume id) where its error mode is exactly what's under test. claude-code
-# and command-code are intentionally NOT exercised here by default — claude-code hits real
-# Anthropic billing per call (see README), and command-code's resume is disabled anyway.
-#
-# Since the 2026-09-02 GLM-5.3 fixes, the tail sections also run hermetic scenarios: a
-# fake `agy` shimmed onto PATH (no real backend called), direct lock-module harnesses,
-# and a doctor gate check with stubbed binaries — those need no live backend at all.
+# Fully hermetic: this script NEVER invokes a real backend. It exercises the real router
+# against fake `agy`/`codex` shims supplied per-section, and an inert stub for both binaries
+# is placed at the front of PATH for the whole run (FIX 4) so a bare backend invocation can
+# never reach a real binary. claude-code and command-code are intentionally NOT exercised
+# here — claude-code hits real Anthropic billing per call (see README), and command-code's
+# resume is disabled anyway.
 #
 # Runs against a throwaway HOME so it is safe to run any time without disturbing real
 # thread state: the real session map and governance ledger are never read, written, or
@@ -19,6 +16,29 @@
 
 set -uo pipefail
 
+# FIX 4 (hermeticity): no test in this script may ever invoke a real codex or agy. Before
+# any test runs, put inert stubs for both at the FRONT of PATH so a bare
+# `node "$ROUTE" codex|agy ...` can only ever hit an inert shim (prints a "stubbed" line,
+# exits 1). Sections that need specific backend behaviour prepend their own fake shim,
+# which shadows these stubs for that invocation only.
+SMOKE_STUBS=$(mktemp -d /tmp/cli-relay-smoke-stubs.XXXXXX) || {
+  echo "failed to create hermetic backend stub dir" >&2
+  exit 1
+}
+for stub in codex agy; do
+  cat > "$SMOKE_STUBS/$stub" << STUB
+#!/bin/sh
+echo "stubbed: $stub invoked by the smoke harness" >&2
+exit 1
+STUB
+  chmod +x "$SMOKE_STUBS/$stub"
+done
+export PATH="$SMOKE_STUBS:$PATH"
+
+# Set when the signal section creates its own slow (still fake) agy shim; referenced by the
+# EXIT trap below, defaulted here so `set -u` cannot trip it if setup aborts early.
+SLOW_BACKEND=""
+
 # Isolate the entire run in a fresh HOME before any cli-relay path is resolved.
 REAL_HOME="$HOME"
 SMOKE_HOME=$(mktemp -d /tmp/cli-relay-smoke-home.XXXXXX) || {
@@ -26,7 +46,7 @@ SMOKE_HOME=$(mktemp -d /tmp/cli-relay-smoke-home.XXXXXX) || {
   exit 1
 }
 export HOME="$SMOKE_HOME"
-trap 'rm -rf "$SMOKE_HOME"' EXIT
+trap 'rm -rf "$SMOKE_HOME" "$SMOKE_STUBS" "${SLOW_BACKEND:-}"' EXIT
 if [ "$SMOKE_HOME" = "$REAL_HOME" ]; then
   echo "refusing to run: isolated smoke home equals the real home ($REAL_HOME)" >&2
   exit 1
@@ -87,71 +107,18 @@ check "list on empty map" 0 "$code"
 echo "$out" | grep -q "no threads recorded" && echo "PASS: empty-map message correct" && PASS=$((PASS+1)) || { echo "FAIL: empty-map message wrong: $out"; FAIL=$((FAIL+1)); }
 
 echo
-if [ "${CLI_RELAY_SMOKE_LIVE:-0}" = 1 ]; then
-echo "== fresh + resume against agy (real call, real context retention check) =="
-fresh_out=$(node "$ROUTE" agy smoke-thread fresh "Reply with exactly: PONG"); fresh_code=$?
-check "agy fresh" 0 "$fresh_code"
-answer_parsed=$(echo "$fresh_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['answer_parsed'])" 2>/dev/null)
-[ "$answer_parsed" = "True" ] && echo "PASS: agy fresh produced a parsed answer" && PASS=$((PASS+1)) || { echo "FAIL: agy fresh answer_parsed=$answer_parsed"; FAIL=$((FAIL+1)); }
-
-resume_out=$(node "$ROUTE" agy smoke-thread resume "What word did I just ask you to reply with? Answer with just that word."); resume_code=$?
-check "agy resume" 0 "$resume_code"
-resume_answer=$(echo "$resume_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['answer'])" 2>/dev/null)
-echo "$resume_answer" | grep -qi "PONG" && echo "PASS: agy resume correctly recalled context" && PASS=$((PASS+1)) || { echo "FAIL: agy resume did not recall context, got: $resume_answer"; FAIL=$((FAIL+1)); }
-
+# ADJUSTED (FIX 4): this block used to dispatch a real agy when CLI_RELAY_SMOKE_LIVE=1.
+# smoke.sh is now hermetic — agy/codex are PATH-stubbed for the whole run — so a "live"
+# dispatch would silently hit the inert stub and either fail or, worse, look like a real
+# result. Real backends are never invoked here, so the block is an explicit skip.
+echo "== live agy checks: SKIPPED (hermetic stubs — real agy is never invoked) =="
+echo "SKIP: live agy checks are disabled under the hermetic stubs (FIX 4); run them manually if you need a real login."
 echo
-echo "== list shows the thread, reset removes it =="
-node "$ROUTE" list | grep -q "smoke-thread" && echo "PASS: list shows the thread" && PASS=$((PASS+1)) || { echo "FAIL: thread missing from list"; FAIL=$((FAIL+1)); }
-reset_out=$(node "$ROUTE" reset smoke-thread); reset_code=$?
-check "reset existing thread" 0 "$reset_code"
-reset2_out=$(node "$ROUTE" reset smoke-thread 2>&1); reset2_code=$?
-check "reset already-gone thread fails" 1 "$reset2_code"
-
-echo
-echo "== pinned facts: pin, verify injection, verify persistence across a fresh restart =="
-node "$ROUTE" agy pin-smoke fresh "Reply with exactly: PONG" > /dev/null 2>&1
-pin_out=$(node "$ROUTE" pin pin-smoke "the secret code word for this thread is BANANA77"); pin_code=$?
-check "pin on existing thread" 0 "$pin_code"
-echo "$pin_out" | grep -q "1 total" && echo "PASS: pin count correct" && PASS=$((PASS+1)) || { echo "FAIL: pin output wrong: $pin_out"; FAIL=$((FAIL+1)); }
-
-pins_out=$(node "$ROUTE" pins pin-smoke); pins_code=$?
-check "pins listing" 0 "$pins_code"
-echo "$pins_out" | grep -q "BANANA77" && echo "PASS: pins listing shows the fact" && PASS=$((PASS+1)) || { echo "FAIL: pins listing missing fact: $pins_out"; FAIL=$((FAIL+1)); }
-
-resume_pin_out=$(node "$ROUTE" agy pin-smoke resume "What is the secret code word for this thread? Answer with just the word.")
-resume_pin_answer=$(echo "$resume_pin_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['answer'])" 2>/dev/null)
-echo "$resume_pin_answer" | grep -qi "BANANA77" && echo "PASS: resume received the injected pin (never stated in the visible prompt)" && PASS=$((PASS+1)) || { echo "FAIL: pin was not injected on resume, got: $resume_pin_answer"; FAIL=$((FAIL+1)); }
-
-# The core design claim: a genuinely NEW native session (fresh, not resume) still knows the
-# pinned fact, because pins persist across fresh restarts and get re-injected either way.
-old_id=$(python3 -c "import json; print(json.load(open('$MAP'))['sessions']['pin-smoke']['native_session_id'])")
-fresh2_out=$(node "$ROUTE" agy pin-smoke fresh "What is the secret code word for this thread? Answer with just the word." 2>/dev/null)
-new_id=$(echo "$fresh2_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['native_session_id'])" 2>/dev/null)
-fresh2_answer=$(echo "$fresh2_out" | python3 -c "import json,sys; print(json.load(sys.stdin)['answer'])" 2>/dev/null)
-[ "$new_id" != "$old_id" ] && echo "PASS: fresh restart produced a genuinely new native session" && PASS=$((PASS+1)) || { echo "FAIL: session id did not change on fresh: $new_id"; FAIL=$((FAIL+1)); }
-echo "$fresh2_answer" | grep -qi "BANANA77" && echo "PASS: pin survived fresh restart and was injected into the brand-new session" && PASS=$((PASS+1)) || { echo "FAIL: pin did not survive fresh restart, got: $fresh2_answer"; FAIL=$((FAIL+1)); }
-
-unpin_out=$(node "$ROUTE" unpin pin-smoke 1); unpin_code=$?
-check "unpin by index" 0 "$unpin_code"
-pins_after=$(node "$ROUTE" pins pin-smoke)
-echo "$pins_after" | grep -q "no pinned facts" && echo "PASS: pin removed" && PASS=$((PASS+1)) || { echo "FAIL: pin still present after unpin: $pins_after"; FAIL=$((FAIL+1)); }
-
-pin_missing_out=$(node "$ROUTE" pin does-not-exist "x" 2>&1); pin_missing_code=$?
-check "pin on nonexistent thread fails" 1 "$pin_missing_code"
-unpin_bad_out=$(node "$ROUTE" unpin pin-smoke 99 2>&1); unpin_bad_code=$?
-check "unpin out-of-range index fails" 1 "$unpin_bad_code"
-
-# Fable review finding: reset must warn before silently destroying pins (was quiet before).
-node "$ROUTE" pin pin-smoke "a fact that reset is about to destroy" > /dev/null 2>&1
-reset_warn_out=$(node "$ROUTE" reset pin-smoke 2>&1); reset_warn_code=$?
-check "reset on a pinned thread still succeeds" 0 "$reset_warn_code"
-echo "$reset_warn_out" | grep -q "will be destroyed by reset" && echo "PASS: reset warns before destroying pins" && PASS=$((PASS+1)) || { echo "FAIL: reset did not warn about pins: $reset_warn_out"; FAIL=$((FAIL+1)); }
-
-echo
-else
-echo "SKIP: live agy checks (set CLI_RELAY_SMOKE_LIVE=1 to run them against a real agy login)"
-fi
-echo "== circuit breaker: seed 2 prior failures, live-fire the 3rd against codex with a bad id =="
+# FIX 4: the codex below is the inert PATH stub (prints 'stubbed', exits 1), not a real
+# binary. Its nonzero exit still means cli-relay exits 1, not 3 — the same outcome the
+# real bad-id call produced — so the breaker's expectations are unchanged; see README
+# exit-code table.
+echo "== circuit breaker: seed 2 prior failures, fire the 3rd against the hermetic codex stub =="
 cat > "$MAP" << 'EOF'
 {"version":1,"sessions":{"circuit-smoke":{"backend":"codex","native_session_id":"00000000-0000-0000-0000-000000000000","confirmed":true,"status":"ready","last_run_iso":"2026-01-01T00:00:00.000Z","last_exit_code":1,"consecutive_resume_failures":2}}}
 EOF
@@ -168,8 +135,18 @@ echo "$retry_out" | grep -q "refusing to guess" && echo "PASS: refusal message c
 
 echo
 echo "== signal handling: SIGINT mid-run must exit 130, clean up child + lock =="
+# FIX 4: agy is PATH-stubbed for the whole run, so this section supplies its own slow —
+# still fake — agy shim. A mid-run interrupt needs a backend still running when SIGINT
+# arrives; the inert stub exits instantly and would race the signal.
+SLOW_BACKEND=$(mktemp -d /tmp/route-smoke-slow.XXXXXX)
+cat > "$SLOW_BACKEND/agy" << 'SLOW_AGY'
+#!/bin/sh
+sleep 60
+exit 0
+SLOW_AGY
+chmod +x "$SLOW_BACKEND/agy"
 rm -rf "$MAP" "$MAP.lock"
-node "$ROUTE" agy sig-smoke fresh "Write a very long, detailed essay about the history of distributed systems." > /tmp/route-smoke-sig.out 2>&1 &
+PATH="$SLOW_BACKEND:$PATH" node "$ROUTE" agy sig-smoke fresh "Write a very long, detailed essay about the history of distributed systems." > /tmp/route-smoke-sig.out 2>&1 &
 RPID=$!
 sleep 3
 kill -INT "$RPID" 2>/dev/null
@@ -186,7 +163,7 @@ rm -rf "$MAP" "$MAP.lock"
 mkdir "$MAP.lock"
 sleep 30 & HOLDER_PID=$!
 python3 -c "import json; json.dump({'pid': $HOLDER_PID, 'ts': __import__('time').time()*1000}, open('$MAP.lock/holder.json','w'))"
-node "$ROUTE" agy prespawn-smoke fresh "Reply with exactly: PONG" > /tmp/route-smoke-prespawn.out 2>&1 &
+PATH="$SLOW_BACKEND:$PATH" node "$ROUTE" agy prespawn-smoke fresh "Reply with exactly: PONG" > /tmp/route-smoke-prespawn.out 2>&1 &
 RPID=$!
 sleep 1
 start_ts=$(date +%s)
@@ -834,6 +811,80 @@ STDERR_LIMIT_CHECK
 check "stderr chatter preserves the successful stdout result" 0 "$?"
 
 echo
+echo "== adapter failure classification: ERROR:/AGY_ERROR: lines fail a run even at exit 0 =="
+mkdir -p "$(dirname "$MAP")"
+FAIL_BACKENDS=$(mktemp -d /tmp/route-smoke-fail.XXXXXX)
+# codex: an ERROR: { line on both streams plus a parseable success, exit 0. Only
+# classifyFailure can turn this into a failure (parse alone would have confirmed it).
+cat > "$FAIL_BACKENDS/codex" << 'FAIL_CODEX'
+#!/bin/sh
+echo 'ERROR: {"code": 429, "message": "rate limited"}'
+printf '{"type":"thread.started","thread_id":"fail-codex-session"}\n'
+printf '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n'
+echo 'ERROR: {"code": 429, "message": "rate limited"}' >&2
+exit 0
+FAIL_CODEX
+# agy: an AGY_ERROR: line alongside a parseable success object, exit 0.
+cat > "$FAIL_BACKENDS/agy" << 'FAIL_AGY'
+#!/bin/sh
+echo 'AGY_ERROR: backend exploded'
+printf '{"conversation_id": "fail-agy-session", "response": "ok"}\n'
+exit 0
+FAIL_AGY
+chmod +x "$FAIL_BACKENDS/codex" "$FAIL_BACKENDS/agy"
+
+for case_spec in codex:fail-codex agy:fail-agy; do
+  backend=${case_spec%%:*}
+  thread=${case_spec##*:}
+  rm -rf "$MAP" "$MAP.lock"
+  rm -f "$LEDGER"
+  PATH="$FAIL_BACKENDS:$PATH" node "$ROUTE" "$backend" "$thread" fresh "hello" > /dev/null 2>&1
+  fail_code=$?
+  check "$backend error marker fails the run despite exit 0" 1 "$fail_code"
+  fail_confirmed=$(python3 -c "import json; print(json.load(open('$MAP'))['sessions']['$thread']['confirmed'])")
+  [ "$fail_confirmed" = "False" ] && echo "PASS: $backend failed run left the thread unconfirmed" && PASS=$((PASS+1)) || { echo "FAIL: $backend thread confirmed=$fail_confirmed"; FAIL=$((FAIL+1)); }
+  fail_outcome=$(python3 -c "import json; print(json.loads([l for l in open('$LEDGER') if l.strip()][-1])['outcome'])")
+  [ "$fail_outcome" = "failed" ] && echo "PASS: $backend failed run recorded ledger outcome=failed" && PASS=$((PASS+1)) || { echo "FAIL: $backend ledger outcome=$fail_outcome"; FAIL=$((FAIL+1)); }
+done
+rm -rf "$FAIL_BACKENDS"
+
+echo
+echo "== FIX 2/FIX 3: non-zero exit never confirms; AGY_ERROR: only fails at line start =="
+NONZERO_BACKENDS=$(mktemp -d /tmp/route-smoke-nonzero.XXXXXX)
+# FIX 2: a fresh codex that prints a valid id + parseable answer but exits 1. The answer
+# must not paper over the failure: the run fails and the thread must stay unconfirmed.
+cat > "$NONZERO_BACKENDS/codex" << 'NONZERO_CODEX'
+#!/bin/sh
+printf '{"type":"thread.started","thread_id":"nonzero-codex-session"}\n'
+printf '{"type":"item.completed","item":{"type":"agent_message","text":"looks fine"}}\n'
+exit 1
+NONZERO_CODEX
+# FIX 3: an agy answer that merely contains "AGY_ERROR:" mid-line, exit 0 — succeeds.
+cat > "$NONZERO_BACKENDS/agy" << 'MIDLINE_AGY'
+#!/bin/sh
+printf '{"conversation_id": "midline-agy-session", "response": "the log said AGY_ERROR: but it recovered"}\n'
+exit 0
+MIDLINE_AGY
+chmod +x "$NONZERO_BACKENDS/codex" "$NONZERO_BACKENDS/agy"
+
+rm -rf "$MAP" "$MAP.lock"; rm -f "$LEDGER"
+PATH="$NONZERO_BACKENDS:$PATH" node "$ROUTE" codex nonzero-smoke fresh "hi" > /dev/null 2>&1
+nonzero_code=$?
+check "codex fresh exit 1 with a parseable answer fails" 1 "$nonzero_code"
+nonzero_confirmed=$(python3 -c "import json; print(json.load(open('$MAP'))['sessions']['nonzero-smoke']['confirmed'])")
+[ "$nonzero_confirmed" = "False" ] && echo "PASS: non-zero fresh run left the thread unconfirmed" && PASS=$((PASS+1)) || { echo "FAIL: thread confirmed=$nonzero_confirmed"; FAIL=$((FAIL+1)); }
+nonzero_outcome=$(python3 -c "import json; print(json.loads([l for l in open('$LEDGER') if l.strip()][-1])['outcome'])")
+[ "$nonzero_outcome" = "failed" ] && echo "PASS: non-zero fresh run recorded ledger outcome=failed" && PASS=$((PASS+1)) || { echo "FAIL: ledger outcome=$nonzero_outcome"; FAIL=$((FAIL+1)); }
+
+rm -rf "$MAP" "$MAP.lock"; rm -f "$LEDGER"
+PATH="$NONZERO_BACKENDS:$PATH" node "$ROUTE" agy midline-smoke fresh "hi" > /dev/null 2>&1
+midline_code=$?
+check "agy answer with AGY_ERROR: mid-line succeeds" 0 "$midline_code"
+midline_confirmed=$(python3 -c "import json; print(json.load(open('$MAP'))['sessions']['midline-smoke']['confirmed'])")
+[ "$midline_confirmed" = "True" ] && echo "PASS: mid-line marker left the thread confirmed" && PASS=$((PASS+1)) || { echo "FAIL: thread confirmed=$midline_confirmed"; FAIL=$((FAIL+1)); }
+rm -rf "$NONZERO_BACKENDS"
+
+echo
 echo "== governance ledger and escalation tier gate (hermetic, isolated HOME) =="
 cat > "$WORK/governance-ledger-worker.mjs" << 'GOVERNANCE_LEDGER_WORKER'
 import { join } from 'node:path';
@@ -1232,6 +1283,46 @@ function assertIntactReport(report, totalEntries) {
   const duplicate = await runCli(paths, ['--model=a', '--model=b', 'agy', 'model-dup', 'fresh', 'x']);
   expectCode(duplicate, 2, 'duplicate --model');
   assert.match(duplicate.stderr, /--model may be provided only once/);
+  assert.equal(spawnCount(paths), beforeInvalid);
+}
+
+// --mode is a dispatch capability like --model: recognized only before mode, forwarded
+// verbatim to adapters that support it (agy), and never settable from prompt text.
+{
+  const paths = homeFor('mode-flag');
+  const lastArgv = () => JSON.parse(readFileSync(paths.spawnLog, 'utf8').trim().split('\n').at(-1));
+  const lastPrompt = () => lastArgv().at(-1);
+
+  // Prompt text cannot set --mode: the tokens after mode are the prompt, and agy must not
+  // receive a forwarded --mode pair.
+  const injected = await runCli(paths, ['agy', 'mode-inject', 'fresh', 'please', '--mode', 'plan', 'x']);
+  expectCode(injected, 0, 'post-mode --mode is literal prompt');
+  assert.equal(lastPrompt(), 'please --mode plan x');
+  assert.ok(!lastArgv().includes('--mode'));
+
+  // Pre-mode --mode forwards verbatim, in both space and equals forms.
+  const spaceForm = await runCli(paths, ['--mode', 'plan', 'agy', 'mode-space', 'fresh', 'hi']);
+  expectCode(spaceForm, 0, 'pre-mode --mode forwards');
+  const spaceArgv = lastArgv();
+  assert.ok(spaceArgv.includes('--mode') && spaceArgv.includes('plan'));
+
+  const equalsForm = await runCli(paths, ['--mode=accept-edits', 'agy', 'mode-equals', 'fresh', 'hi']);
+  expectCode(equalsForm, 0, '--mode=value forwards');
+  assert.ok(lastArgv().includes('accept-edits'));
+
+  // Preview argv goes through the same adapter call, so --mode must appear there too.
+  const preview = await runCli(paths, ['--dry-run', '--mode', 'plan', 'agy', 'mode-preview', 'fresh', 'hi']);
+  expectCode(preview, 0, 'dry-run argv includes forwarded --mode');
+  assert.equal(JSON.parse(preview.stdout).filter((arg) => arg === '--mode').length, 1);
+
+  // A missing value is a usage error before any spawn; duplicates are rejected too.
+  const beforeInvalid = spawnCount(paths);
+  const missing = await runCli(paths, ['agy', 'mode-missing', '--mode']);
+  expectCode(missing, 2, 'missing --mode value');
+  assert.match(missing.stderr, /--mode requires/);
+  const duplicate = await runCli(paths, ['--mode=a', '--mode=b', 'agy', 'mode-dup', 'fresh', 'x']);
+  expectCode(duplicate, 2, 'duplicate --mode');
+  assert.match(duplicate.stderr, /--mode may be provided only once/);
   assert.equal(spawnCount(paths), beforeInvalid);
 }
 

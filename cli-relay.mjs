@@ -3,7 +3,7 @@
  * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--confirm]
+ *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--mode <name>] [--confirm]
  *     <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
@@ -232,7 +232,7 @@ async function runHousekeeping(cliArgs) {
 
 function printUsage(backends) {
   console.error(
-    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--confirm] ' +
+    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--mode <name>] [--confirm] ' +
     '<backend> <thread> <fresh|resume> <prompt...>',
   );
   console.error('       cli-relay list');
@@ -270,6 +270,8 @@ function parseDispatchFlags(cliArgs) {
   let tierSeen = false;
   let modelValue;
   let modelSeen = false;
+  let modeValue;
+  let modeSeen = false;
   const routingArgs = [];
 
   for (let index = 0; index < cliArgs.length; index += 1) {
@@ -336,9 +338,33 @@ function parseDispatchFlags(cliArgs) {
       }
       continue;
     }
+    if (argument === '--mode' || argument.startsWith('--mode=')) {
+      if (modeSeen) {
+        throw new RelayError(
+          'INVALID_MODE',
+          '--mode may be provided only once',
+          { exitCode: 2 },
+        );
+      }
+      modeSeen = true;
+      if (argument === '--mode') {
+        modeValue = cliArgs[index + 1];
+        index += 1;
+      } else {
+        modeValue = argument.slice('--mode='.length);
+      }
+      if (modeValue == null || modeValue === '' || modeValue.startsWith('--')) {
+        throw new RelayError(
+          'INVALID_MODE',
+          '--mode requires a mode name',
+          { exitCode: 2 },
+        );
+      }
+      continue;
+    }
     routingArgs.push(argument);
   }
-  return { dryRun, confirm, tierValue, modelValue, routingArgs };
+  return { dryRun, confirm, tierValue, modelValue, modeValue, routingArgs };
 }
 
 function sessionForInvocation(map, backend, thread, mode, adapter) {
@@ -451,7 +477,7 @@ async function main() {
   }
 
   const {
-    dryRun, confirm, tierValue, modelValue, routingArgs,
+    dryRun, confirm, tierValue, modelValue, modeValue, routingArgs,
   } = parseDispatchFlags(cliArgs);
   const [backend, thread, mode, ...rest] = routingArgs;
   const prompt = rest.join(' ');
@@ -515,8 +541,8 @@ async function main() {
     assertNotInFlight(session, thread);
     const augmentedPrompt = buildPinnedBlock(session.pinned_facts) + prompt;
     const argv = mode === 'resume'
-      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue)
-      : adapter.fresh(augmentedPrompt, modelValue);
+      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue, modeValue)
+      : adapter.fresh(augmentedPrompt, modelValue, modeValue);
     console.log(JSON.stringify(argv));
     return;
   }
@@ -574,14 +600,18 @@ async function main() {
 
   const augmentedPrompt = buildPinnedBlock(record.pinned_facts) + prompt;
   const argv = mode === 'resume'
-    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue)
-    : adapter.fresh(augmentedPrompt, modelValue);
+    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue, modeValue)
+    : adapter.fresh(augmentedPrompt, modelValue, modeValue);
   const env = scrubEnv(adapter.env);
   const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
   if (outputOverflow) {
     console.error(`"${backend}" stdout exceeded the ${MAX_STDOUT_BYTES}-byte limit; refusing to parse truncated output.`);
   }
-  const result = outputOverflow ? { id: null, answer: null } : adapter.parse(out);
+  const classifiedFailure = typeof adapter.classifyFailure === 'function' &&
+    adapter.classifyFailure(out, err);
+  const result = (outputOverflow || classifiedFailure)
+    ? { id: null, answer: null }
+    : adapter.parse(out);
   // Native ids become argv values on resume. Reject malformed ids before they can
   // be confirmed and saved, while still completing the normal outcome bookkeeping.
   const validId = typeof result.id === 'string' && result.id.trim().length > 0 &&
@@ -690,8 +720,11 @@ async function main() {
     }
     if (newId) {
       session.native_session_id = newId;
-      session.confirmed = true;
-      session.consecutive_resume_failures = 0;
+      // A parseable answer is not proof the run succeeded: a backend that exits non-zero
+      // (including one killed by a signal, where code is null) did not complete. Confirm
+      // only on a clean exit, or the thread would become resumable as if it had succeeded.
+      session.confirmed = code === 0;
+      if (code === 0) session.consecutive_resume_failures = 0;
     }
     if (mode === 'resume') {
       if (!cancelled) {
