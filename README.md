@@ -109,6 +109,19 @@ touching the session map at all — it enforces the same refusals a real run wou
 preview a `resume` on an unconfirmed thread, won't preview against a thread with a run
 already in flight), so what it shows is genuinely what would happen, not a best-effort guess.
 
+`cli-relay pick '<task description>'` is an **advisory** model recommendation. It builds
+candidates from the same live listings `cli-relay models` uses (agy and command-code; a
+backend with no listing command is skipped), caps the total at 12, then asks the Jev model
+(`command-code -m typesafe/jev`, non-interactive, stdin from `/dev/null`) how well each
+candidate fits the task. Each answer is a probability `p` that the candidate is a good fit;
+the table is ranked by `p` and each row gets a verdict from `confidence = max(p, 1-p)`:
+`recommended` when `p >= 0.9`, `not recommended` when `p <= 0.1`, otherwise
+`uncertain, re-evaluate`. A failing or unparseable candidate is reported and skipped; the
+command exits 1 only when no candidate got an answer. It never applies anything — no config,
+session, default, or ledger change is ever made (the last line always says
+`advisory only, nothing was applied`), and the task text is passed as a spawn argument, never
+through a shell.
+
 Dispatches default to tier 1 (`read-only`). `--tier` also accepts `local` (2),
 `reversible-remote` (3), and `irreversible` (4), using either `--tier <value>` or
 `--tier=<value>`. Tiers 3 and 4 require `--confirm`; otherwise cli-relay refuses before

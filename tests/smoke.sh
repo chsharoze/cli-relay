@@ -1430,6 +1430,100 @@ echo "$models_agy" | grep -q "command-code-model-x" && { echo "FAIL: models agy 
 rm -rf "$MODEL_DIR"
 
 echo
+echo "== pick: advisory model recommendation (hermetic fake command-code + listing) =="
+# A single fake command-code serves both roles: `--list-models` echoes one model per line
+# (the candidate source), and a `-p <json> -m typesafe/jev` call returns a fixed Jev JSON
+# keyed off the candidate name embedded in the payload. agy falls through to the global
+# inert PATH stub, so its listing is skipped. No real command-code or Jev is ever invoked.
+PICK_DIR=$(mktemp -d /tmp/route-smoke-pick.XXXXXX)
+cat > "$PICK_DIR/command-code" << 'PICK_COMMAND_CODE'
+#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--list-models" ]; then
+    echo "glm-5.2-flash"
+    echo "glm-5.2-air"
+    echo "glm-5.2-mini"
+    exit 0
+  fi
+done
+payload=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-p" ]; then payload="$arg"; fi
+  prev="$arg"
+done
+case "$payload" in
+  *flash*) p="0.95" ;;
+  *mini*)  p="0.05" ;;
+  *)       p="0.4" ;;
+esac
+printf '{"answers":{"fit":{"noul":%s}}}\n' "$p"
+exit 0
+PICK_COMMAND_CODE
+chmod +x "$PICK_DIR/command-code"
+
+# Advisory-only means no state change anywhere under the isolated ~/.cli-relay.
+state_checksum() {
+  python3 - "$1" << 'STATE_HASH'
+import hashlib, os, sys
+root = sys.argv[1]
+entries = []
+if os.path.isdir(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            path = os.path.join(dirpath, filename)
+            with open(path, 'rb') as handle:
+                entries.append((os.path.relpath(path, root), hashlib.sha256(handle.read()).hexdigest()))
+print(hashlib.sha256(repr(entries).encode()).hexdigest())
+STATE_HASH
+}
+pick_state_before=$(state_checksum "$HOME/.cli-relay")
+
+pick_out=$(PATH="$PICK_DIR:$PATH" node "$ROUTE" pick "write a short README intro" 2>&1); pick_code=$?
+check "pick exits 0 when at least one candidate answered" 0 "$pick_code"
+
+flash_line=$(printf '%s\n' "$pick_out" | grep -n "glm-5.2-flash" | head -1 | cut -d: -f1)
+mini_line=$(printf '%s\n' "$pick_out" | grep -n "glm-5.2-mini" | head -1 | cut -d: -f1)
+[ -n "$flash_line" ] && [ -n "$mini_line" ] && [ "$flash_line" -lt "$mini_line" ] \
+  && echo "PASS: ranked output puts the highest p first" && PASS=$((PASS+1)) \
+  || { echo "FAIL: ranked order wrong: $pick_out"; FAIL=$((FAIL+1)); }
+echo "$pick_out" | grep -q "glm-5.2-flash.*0.95.*recommended" \
+  && echo "PASS: high-probability candidate is 'recommended'" && PASS=$((PASS+1)) \
+  || { echo "FAIL: recommended verdict missing: $pick_out"; FAIL=$((FAIL+1)); }
+echo "$pick_out" | grep -q "glm-5.2-mini.*0.05.*not recommended" \
+  && echo "PASS: low-probability candidate is 'not recommended'" && PASS=$((PASS+1)) \
+  || { echo "FAIL: not-recommended verdict missing: $pick_out"; FAIL=$((FAIL+1)); }
+echo "$pick_out" | grep -q "^advisory only, nothing was applied$" \
+  && echo "PASS: advisory-only line present" && PASS=$((PASS+1)) \
+  || { echo "FAIL: advisory line missing: $pick_out"; FAIL=$((FAIL+1)); }
+
+pick_state_after=$(state_checksum "$HOME/.cli-relay")
+[ "$pick_state_before" = "$pick_state_after" ] \
+  && echo "PASS: pick changed nothing under ~/.cli-relay (advisory only)" && PASS=$((PASS+1)) \
+  || { echo "FAIL: pick changed ~/.cli-relay state"; FAIL=$((FAIL+1)); }
+
+node "$ROUTE" pick > /dev/null 2>&1; pick_usage_code=$?
+check "pick with no task is a usage error" 2 "$pick_usage_code"
+
+# command-code deliberately absent: the fake agy supplies candidates, but the Jev call
+# cannot run, so pick reports the missing binary and exits 1. A restricted /usr/bin:/bin
+# PATH keeps any real command-code out of reach on the dev machine.
+PICK_AGY_ONLY=$(mktemp -d /tmp/route-smoke-pick-agy.XXXXXX)
+cat > "$PICK_AGY_ONLY/agy" << 'PICK_AGY'
+#!/bin/sh
+echo "agy-model-alpha"
+PICK_AGY
+chmod +x "$PICK_AGY_ONLY/agy"
+PICK_NODE=$(command -v node)
+pick_missing_out=$(PATH="$PICK_AGY_ONLY:/usr/bin:/bin" "$PICK_NODE" "$ROUTE" pick "some task" 2>&1); pick_missing_code=$?
+check "pick exits 1 when command-code is not on PATH" 1 "$pick_missing_code"
+echo "$pick_missing_out" | grep -qi "command-code" \
+  && echo "PASS: missing command-code is reported" && PASS=$((PASS+1)) \
+  || { echo "FAIL: missing command-code not reported: $pick_missing_out"; FAIL=$((FAIL+1)); }
+rm -rf "$PICK_AGY_ONLY" "$PICK_DIR"
+
+echo
 echo "== governance audit regressions: resource locks and bounded ledger recovery =="
 node "$(dirname "$ROUTE")/tests/ledger-lock-regressions.mjs"
 check "shared ledger aliases and suspended writers serialize without stale links" 0 "$?"
