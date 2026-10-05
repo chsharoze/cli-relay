@@ -607,8 +607,8 @@ dispatch already is.
 it; that's on you when you choose the reviewer call (read-only flags, no write tools — see
 `codex-pipeline`). It also enforces no round caps, no client/confidentiality gate, and no
 "the builder wrote into a worktree, not the source tree" rule — those stay manual discipline,
-same as everywhere else in this project's client-repo workflow (draft the command, don't run
-it against source-of-truth files — see the `feedback_client_repo_prompt_not_execute` memory).
+same as everywhere else in this project's workflow (draft the command, don't run it against
+source-of-truth files).
 
 Hermetic tests: `tests/loop-governance.mjs` (schema rules, snapshot fingerprinting +
 symlink-as-text + diff, and the full record/check binding lifecycle including plan-mutation,
