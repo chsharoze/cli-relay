@@ -447,6 +447,88 @@ console.log(JSON.stringify({ allowed: result.allowed, reason: result.reason }));
     }
     console.log('PASS: (h) unreadable ledger tail refuses approval recording');
   }
+
+  // --- FIX B (i): a record whose model differs from its anchored ledger entry is refused ---
+  {
+    const thread = 'thread-model-anchor';
+    const planI = join(scratch, 'plan-i.md');
+    writeFileSync(planI, '# plan i\n');
+    const repoI = join(scratch, 'repo-i');
+    mkdirSync(repoI);
+    writeFileSync(join(repoI, 'a.py'), 'print(1)\n');
+
+    await recordApproval({
+      thread, planPath: planI, repoPath: repoI, reviewer: 'codex', model: 'm1',
+      verdict: { verdict: 'APPROVED', summary: 'ok', findings: [], coverage: 'all' },
+    });
+    assert.equal(
+      checkApproval({ thread, planPath: planI, repoPath: repoI }).allowed,
+      true,
+      'the untampered anchor must pass before the record is altered',
+    );
+
+    // Alter only the stored record's model; the ledger anchor still records m1.
+    const store = JSON.parse(readFileSync(APPROVALS_PATH, 'utf8'));
+    for (const records of Object.values(store.approvals[thread])) {
+      for (const entry of records) entry.model = 'm2';
+    }
+    writeFileSync(APPROVALS_PATH, `${JSON.stringify(store, null, 2)}\n`);
+
+    const result = checkApproval({ thread, planPath: planI, repoPath: repoI });
+    assert.equal(result.allowed, false);
+    assert.match(result.reason, /model/);
+    console.log('PASS: (i) a record whose model differs from its anchor is refused');
+  }
+
+  // --- FIX B (j): a record whose plan_path differs from its anchored entry is refused ---
+  {
+    const thread = 'thread-planpath-anchor';
+    const planJ = join(scratch, 'plan-j.md');
+    const planJAlt = join(scratch, 'plan-j-alt.md');
+    const planBytes = '# plan j\nidentical bytes\n';
+    writeFileSync(planJ, planBytes);
+    writeFileSync(planJAlt, planBytes); // identical bytes, different path
+    const repoJ = join(scratch, 'repo-j');
+    mkdirSync(repoJ);
+    writeFileSync(join(repoJ, 'a.py'), 'print(1)\n');
+
+    await recordApproval({
+      thread, planPath: planJ, repoPath: repoJ, reviewer: 'codex', model: 'm1',
+      verdict: { verdict: 'APPROVED', summary: 'ok', findings: [], coverage: 'all' },
+    });
+    assert.equal(checkApproval({ thread, planPath: planJ, repoPath: repoJ }).allowed, true);
+
+    // Move the stored record's plan_path; the plan bytes and repo are unchanged, so only
+    // the anchor comparison can catch the mismatch.
+    const store = JSON.parse(readFileSync(APPROVALS_PATH, 'utf8'));
+    for (const records of Object.values(store.approvals[thread])) {
+      for (const entry of records) entry.plan_path = planJAlt;
+    }
+    writeFileSync(APPROVALS_PATH, `${JSON.stringify(store, null, 2)}\n`);
+
+    const result = checkApproval({ thread, planPath: planJAlt, repoPath: repoJ });
+    assert.equal(result.allowed, false);
+    assert.match(result.reason, /plan path/);
+    console.log('PASS: (j) a record whose plan_path differs from its anchor is refused');
+  }
+
+  // --- FIX C (k): a corrupt approvals.json denies with a reason and never throws ---
+  {
+    const savedApprovals = readFileSync(APPROVALS_PATH, 'utf8');
+    let result;
+    try {
+      writeFileSync(APPROVALS_PATH, '{ this is not valid json\n');
+      result = checkApproval({ thread: 'thread-a' });
+    } catch (error) {
+      assert.fail(`checkApproval must not throw on a corrupt approvals.json: ${error.message}`);
+    } finally {
+      writeFileSync(APPROVALS_PATH, savedApprovals);
+    }
+    assert.equal(result.allowed, false);
+    assert.equal(typeof result.reason, 'string');
+    assert.ok(result.reason.length > 0, 'a denial from a corrupt store must carry a reason');
+    console.log('PASS: (k) corrupt approvals.json denies with a reason and does not throw');
+  }
 } finally {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;

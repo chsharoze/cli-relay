@@ -324,6 +324,18 @@ function anchorViolation(ledgerByHash, { thread, record }) {
     return `approval anchor ${hash} records reviewer ${JSON.stringify(entry.backend)}, ` +
       `not "${record.reviewer}"`;
   }
+  if ((entry.model ?? null) !== (record.model ?? null)) {
+    return `approval anchor ${hash} records model ${JSON.stringify(entry.model ?? null)}, ` +
+      `not ${JSON.stringify(record.model ?? null)}`;
+  }
+  if (entry.plan_path !== record.plan_path) {
+    return `approval anchor ${hash} records plan path ${JSON.stringify(entry.plan_path ?? null)}, ` +
+      `not ${JSON.stringify(record.plan_path ?? null)}`;
+  }
+  if (entry.repo_path !== record.repo_path) {
+    return `approval anchor ${hash} records repo path ${JSON.stringify(entry.repo_path ?? null)}, ` +
+      `not ${JSON.stringify(record.repo_path ?? null)}`;
+  }
   if ((entry.approval_verdict ?? null) !== (record.verdict?.verdict ?? null)) {
     return `approval anchor ${hash} records verdict ${JSON.stringify(entry.approval_verdict ?? null)}, ` +
       `not "${record.verdict?.verdict ?? 'unknown'}"`;
@@ -478,7 +490,21 @@ export function missingApprovalAnchors() {
  * current record exists, every current record is APPROVED, and every current record's
  * ledger anchor still resolves and agrees. There is no override.
  */
-export function checkApproval({ thread, planPath, repoPath, snapshotExclude }) {
+export function checkApproval(options = {}) {
+  try {
+    return checkApprovalUnsafe(options);
+  } catch (error) {
+    // A corrupt approvals.json, an unsupported store version, or a snapshot failure must
+    // fail closed as a denial with a reason, never as an uncaught exception — a caller like
+    // `loop check` only turns a returned denial into its non-zero exit code.
+    return {
+      allowed: false,
+      reason: `approval check failed closed: ${error?.message ?? String(error)}`,
+    };
+  }
+}
+
+function checkApprovalUnsafe({ thread, planPath, repoPath, snapshotExclude } = {}) {
   const raw = loadApprovals().approvals[thread];
   if (raw === undefined || raw === null) {
     return { allowed: false, reason: `no approval recorded for thread "${thread}"` };
