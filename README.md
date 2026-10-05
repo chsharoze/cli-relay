@@ -49,9 +49,11 @@ installing any of them confirms cli-relay can see it):
 ## Usage
 
 ```
-cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
+cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
 cli-relay list
 cli-relay doctor
+cli-relay models [backend]
+cli-relay pick '<task>'
 cli-relay audit verify
 cli-relay reset <thread>
 cli-relay pin <thread> "<fact>"
@@ -65,8 +67,8 @@ cli-relay loop check <thread> [--plan <path>] [--repo <path>]
 Backends: `codex`, `agy`, `claude-code`, `command-code` (command-code is fresh-only —
 its resume showed a reproducible seed-turn bug live, see file header).
 
-Dispatch flags (`--tier`, `--confirm`, `--dry-run`, and `--print-command`) must appear
-before, or interspersed among, the three routing arguments `<backend> <thread>
+Dispatch flags (`--tier`, `--model`, `--confirm`, `--dry-run`, and `--print-command`) must
+appear before, or interspersed among, the three routing arguments `<backend> <thread>
 <fresh|resume>`. The mode argument ends flag parsing: every token after `fresh` or
 `resume` is literal prompt text, even if it looks like a flag. For example:
 
@@ -76,9 +78,18 @@ cli-relay agy --tier=irreversible deploy --confirm fresh deploy the approved cha
 cli-relay agy discuss fresh explain --confirm and --tier=irreversible
 ```
 
-The first two declare and confirm tier 4. The third remains at the default tier 1 and
-passes `explain --confirm and --tier=irreversible` to the backend unchanged. In particular,
-prompt text cannot supply confirmation, override a declared tier, or activate a preview.
+`--model <name>` (or `--model=<name>`) selects the backend's model for that call. There is
+no cli-relay-side model table — the name is passed through verbatim, so a backend that
+doesn't recognize it fails the call as it normally would; `cli-relay models` shows each
+backend's available names where the backend exposes a listing command (agy, command-code),
+and reports "pass-through" for the ones that accept any name but can list none (codex,
+claude-code). When `--model` is omitted each adapter keeps its own default. Because the
+model is a routing flag, a prompt containing the literal token `--model` cannot change it.
+
+The first two examples above declare and confirm tier 4. The third remains at the default
+tier 1 and passes `explain --confirm and --tier=irreversible` to the backend unchanged. In
+particular, prompt text cannot supply confirmation, override a declared tier, select a
+model, or activate a preview.
 
 `cli-relay doctor` checks that each backend's binary is actually resolvable on PATH —
 useful after a fresh machine setup or when a backend call fails and you're not sure whether
@@ -622,11 +633,12 @@ repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
   project" prompt — it does not bypass per-tool-call permission checks in headless `-p` mode,
   so every file read/write silently returned `permission_denied` while the process still
   exited 0, looking like a clean run that did almost nothing. Fixed in `src/adapters/
-  command-code.mjs` by switching to `--yolo`. The model is now overridable per call via
+  command-code.mjs` by switching to `--yolo`. The model is overridable per call via
   `CLI_RELAY_COMMAND_CODE_MODEL` (falls back to the prior hardcoded `zai-org/glm-5.2` when
   unset) — command-code routes 68 models and different threads legitimately want different
-  ones; `--model`/`--effort` on the CLI itself are not yet wired through cli-relay's own
-  dispatch flags, this is a stopgap env-var override until they are.
+  ones. As of the `--model` dispatch flag, a per-call `--model <name>` takes precedence over
+  that env override, which in turn takes precedence over the default; `--effort` is still
+  not wired through.
 - `claude-code` calls hit real Anthropic billing against the Pro plan (confirmed ~$0.07-0.13
   per short test call) — not free the way codex/agy effectively are for testing.
 - Grandchild processes that double-fork/setsid out of a backend's process group would survive
@@ -640,7 +652,7 @@ repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
 - **`agy`'s model catalog rotates without notice (found 2026-08-31).** The hardcoded
   `gemini-3.5-flash-medium` in `src/adapters/agy.mjs` was silently removed from agy's own
   model list, breaking every `cli-relay agy` call until caught and bumped to
-  `gemini-3.6-flash-medium`. No detection for this beyond the call itself failing loud (which
+  `gemini-3.8-flash-medium`. No detection for this beyond the call itself failing loud (which
   it does correctly) — if agy calls start failing with "invalid model selection," check
   `agy models` for a renamed/retired model before assuming cli-relay itself is broken.
 - **A narrow SIGINT window can still stick a thread at `status: "running"` (found 2026-09-01,

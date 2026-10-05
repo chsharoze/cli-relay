@@ -3,10 +3,12 @@
  * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--confirm]
+ *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--confirm]
  *     <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
+ *   cli-relay models [backend]
+ *   cli-relay pick '<task>'
  *   cli-relay audit verify
  *   cli-relay reset <thread>
  *   cli-relay pin <thread> "<fact>"
@@ -33,6 +35,8 @@ import { cmdAuditVerify } from './src/commands/audit.mjs';
 import { cmdDoctor } from './src/commands/doctor.mjs';
 import { cmdList } from './src/commands/list.mjs';
 import { cmdLoopCheck, cmdLoopRecord } from './src/commands/loop.mjs';
+import { cmdModels } from './src/commands/models.mjs';
+import { cmdPick } from './src/commands/pick.mjs';
 import { cmdPin } from './src/commands/pin.mjs';
 import { cmdPins } from './src/commands/pins.mjs';
 import { cmdReset } from './src/commands/reset.mjs';
@@ -228,11 +232,13 @@ async function runHousekeeping(cliArgs) {
 
 function printUsage(backends) {
   console.error(
-    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--confirm] ' +
+    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--confirm] ' +
     '<backend> <thread> <fresh|resume> <prompt...>',
   );
   console.error('       cli-relay list');
   console.error('       cli-relay doctor');
+  console.error('       cli-relay models [backend]');
+  console.error("       cli-relay pick '<task>'");
   console.error('       cli-relay audit verify');
   console.error('       cli-relay reset <thread>');
   console.error('       cli-relay pin <thread> "<fact>"');
@@ -247,7 +253,7 @@ function printUsage(backends) {
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
 
-// Governance/routing flags (--dry-run, --print-command, --tier, --confirm) are only
+// Governance/routing flags (--dry-run, --print-command, --tier, --model, --confirm) are only
 // recognized before the third positional routing argument (mode: fresh/resume) is
 // collected. Once mode is filled in, every remaining word is prompt text by definition
 // and must never be reinterpreted as a flag -- a prompt that happens to contain the
@@ -262,6 +268,8 @@ function parseDispatchFlags(cliArgs) {
   let confirm = false;
   let tierValue;
   let tierSeen = false;
+  let modelValue;
+  let modelSeen = false;
   const routingArgs = [];
 
   for (let index = 0; index < cliArgs.length; index += 1) {
@@ -304,9 +312,33 @@ function parseDispatchFlags(cliArgs) {
       }
       continue;
     }
+    if (argument === '--model' || argument.startsWith('--model=')) {
+      if (modelSeen) {
+        throw new RelayError(
+          'INVALID_MODEL',
+          '--model may be provided only once',
+          { exitCode: 2 },
+        );
+      }
+      modelSeen = true;
+      if (argument === '--model') {
+        modelValue = cliArgs[index + 1];
+        index += 1;
+      } else {
+        modelValue = argument.slice('--model='.length);
+      }
+      if (modelValue == null || modelValue === '' || modelValue.startsWith('--')) {
+        throw new RelayError(
+          'INVALID_MODEL',
+          '--model requires a model name',
+          { exitCode: 2 },
+        );
+      }
+      continue;
+    }
     routingArgs.push(argument);
   }
-  return { dryRun, confirm, tierValue, routingArgs };
+  return { dryRun, confirm, tierValue, modelValue, routingArgs };
 }
 
 function sessionForInvocation(map, backend, thread, mode, adapter) {
@@ -404,9 +436,22 @@ async function main() {
     process.exitCode = anyBackendUsable ? 0 : 1;
     return;
   }
+  if (cliArgs[0] === 'models') {
+    await cmdModels(adapters, cliArgs[1]);
+    return;
+  }
+  if (cliArgs[0] === 'pick') {
+    await cmdPick(adapters, cliArgs.slice(1).join(' '));
+    return;
+  }
+  if (cliArgs[0] === 'help') {
+    printUsage(adapters);
+    process.exitCode = 0;
+    return;
+  }
 
   const {
-    dryRun, confirm, tierValue, routingArgs,
+    dryRun, confirm, tierValue, modelValue, routingArgs,
   } = parseDispatchFlags(cliArgs);
   const [backend, thread, mode, ...rest] = routingArgs;
   const prompt = rest.join(' ');
@@ -470,8 +515,8 @@ async function main() {
     assertNotInFlight(session, thread);
     const augmentedPrompt = buildPinnedBlock(session.pinned_facts) + prompt;
     const argv = mode === 'resume'
-      ? adapter.resume(session.native_session_id, augmentedPrompt)
-      : adapter.fresh(augmentedPrompt);
+      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue)
+      : adapter.fresh(augmentedPrompt, modelValue);
     console.log(JSON.stringify(argv));
     return;
   }
@@ -529,8 +574,8 @@ async function main() {
 
   const augmentedPrompt = buildPinnedBlock(record.pinned_facts) + prompt;
   const argv = mode === 'resume'
-    ? adapter.resume(record.native_session_id, augmentedPrompt)
-    : adapter.fresh(augmentedPrompt);
+    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue)
+    : adapter.fresh(augmentedPrompt, modelValue);
   const env = scrubEnv(adapter.env);
   const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
   if (outputOverflow) {

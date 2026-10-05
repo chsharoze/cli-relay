@@ -47,6 +47,9 @@ function validateAdapter(adapter, sourcePath) {
   if (adapter.checkCompaction != null && typeof adapter.checkCompaction !== 'function') {
     throw new Error(`adapter "${name}" (${sourcePath}) checkCompaction must be a function`);
   }
+  if (adapter.listModels != null && typeof adapter.listModels !== 'function') {
+    throw new Error(`adapter "${name}" (${sourcePath}) listModels must be a function when provided`);
+  }
   if (adapter.binaryCandidates != null &&
       (!Array.isArray(adapter.binaryCandidates) || adapter.binaryCandidates.length === 0 ||
        adapter.binaryCandidates.some((candidate) => typeof candidate !== 'string' || !candidate))) {
@@ -59,6 +62,7 @@ function validateAdapter(adapter, sourcePath) {
     name,
     resume,
     checkCompaction: adapter.checkCompaction ?? (() => null),
+    listModels: adapter.listModels ?? null,
   };
 }
 

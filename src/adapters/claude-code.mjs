@@ -6,12 +6,14 @@ export default {
   order: 30,
   binaryCandidates: ['claude'],
   installHint: 'npm install -g @anthropic-ai/claude-code, then run: claude (once, to authenticate)',
-  fresh: (prompt) => [
+  fresh: (prompt, model) => [
     'claude', '-p', prompt, '--output-format', 'json', '--dangerously-skip-permissions',
+    ...(model ? ['--model', model] : []),
   ],
-  resume: (id, prompt) => [
+  resume: (id, prompt, model) => [
     'claude', '-r', id, '-p', prompt, '--output-format', 'json',
     '--dangerously-skip-permissions',
+    ...(model ? ['--model', model] : []),
   ],
   env: [...ENV_BASE, 'CLAUDE_CODE_OAUTH_TOKEN'],
   parse: (stdout) => parseJsonResult(stdout, { id: 'session_id', answer: 'result' }),

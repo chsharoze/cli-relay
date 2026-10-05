@@ -21,14 +21,15 @@ export default {
   order: 10,
   binaryCandidates: ['codex'],
   installHint: 'npm install -g @openai/codex, then: codex login',
-  fresh: (prompt) => [
+  fresh: (prompt, model) => [
     'codex', 'exec', '--skip-git-repo-check', '--sandbox', 'workspace-write',
-    '-m', 'gpt-5.6-sol', '--json', prompt,
+    '-m', model ?? 'gpt-6.1-sol', '--json', prompt,
   ],
   // `codex exec resume` has no --sandbox flag. This is the only confirmed non-interactive
   // path that restores the write access granted to the fresh invocation.
-  resume: (id, prompt) => [
-    'codex', 'exec', 'resume', id, '--dangerously-bypass-approvals-and-sandbox', '--json', prompt,
+  resume: (id, prompt, model) => [
+    'codex', 'exec', 'resume', id, '--dangerously-bypass-approvals-and-sandbox',
+    '-m', model ?? 'gpt-6.1-sol', '--json', prompt,
   ],
   env: ENV_BASE,
   parse(stdout) {

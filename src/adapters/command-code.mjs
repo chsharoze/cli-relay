@@ -7,21 +7,24 @@ import { parseJsonResult } from '../core/parse-json-result.mjs';
 // CLAUDE.md). --yolo is required for any task that needs real file access. Model is
 // overridable via CLI_RELAY_COMMAND_CODE_MODEL since command-code routes 68 models and
 // different threads legitimately want different ones (default kept as the prior hardcoded
-// zai-org/glm-5.2 so existing threads are unaffected).
+// zai-org/glm-5.2 so existing threads are unaffected). A per-call --model takes precedence
+// over the env override, which in turn takes precedence over the default.
 const DEFAULT_MODEL = 'zai-org/glm-5.2';
+const resolveModel = (model) => model ?? (process.env.CLI_RELAY_COMMAND_CODE_MODEL || DEFAULT_MODEL);
 
 export default {
   name: 'command-code',
   order: 40,
   binaryCandidates: ['command-code'],
   installHint: 'npm install -g command-code, then: command-code login',
-  fresh: (prompt) => [
+  fresh: (prompt, model) => [
     'command-code', '-p', prompt,
-    '-m', process.env.CLI_RELAY_COMMAND_CODE_MODEL || DEFAULT_MODEL,
+    '-m', resolveModel(model),
     '--output-format', 'json', '--yolo', '--no-auto-update',
   ],
   // Resume remains deliberately unsupported because the seed turn can disappear silently.
   resume: null,
+  listModels: () => ['--list-models'],
   env: ENV_BASE,
   parse: (stdout) => parseJsonResult(stdout, { id: 'sessionId', answer: 'finalText' }),
   checkCompaction: (_id, stdout) =>

@@ -1197,6 +1197,44 @@ function assertIntactReport(report, totalEntries) {
   }
 }
 
+// --model is a dispatch capability like --tier: recognized only before mode, forwarded
+// verbatim to the adapter (never validated against a model table), and never settable
+// from prompt text. Routing ends at mode, so a prompt containing the literal "--model"
+// token must not change which model the backend receives.
+{
+  const paths = homeFor('model-flag');
+  const lastArgv = () => JSON.parse(readFileSync(paths.spawnLog, 'utf8').trim().split('\n').at(-1));
+  const lastPrompt = () => lastArgv().at(-1);
+
+  // Prompt text cannot set --model: the tokens after mode are the prompt, and agy keeps
+  // its own default model rather than the injected name.
+  const injected = await runCli(paths, ['agy', 'model-inject', 'fresh', 'please', '--model', 'gpt-999', 'x']);
+  expectCode(injected, 0, 'post-mode --model is literal prompt');
+  assert.equal(lastPrompt(), 'please --model gpt-999 x');
+  const injectedArgv = lastArgv();
+  assert.ok(injectedArgv.includes('--model'));
+  assert.ok(injectedArgv.includes('gemini-3.8-flash-medium'));
+  assert.ok(!injectedArgv.includes('gpt-999'));
+
+  // Pre-mode --model forwards verbatim, in both space and equals forms.
+  const spaceForm = await runCli(paths, ['--model', 'gpt-999', 'agy', 'model-space', 'fresh', 'hi']);
+  expectCode(spaceForm, 0, 'pre-mode --model forwards');
+  assert.ok(lastArgv().includes('gpt-999'));
+  const equalsForm = await runCli(paths, ['--model=gpt-999', 'agy', 'model-equals', 'fresh', 'hi']);
+  expectCode(equalsForm, 0, '--model=name forwards');
+  assert.ok(lastArgv().includes('gpt-999'));
+
+  // A missing value is a usage error before any spawn; duplicates are rejected too.
+  const beforeInvalid = spawnCount(paths);
+  const missing = await runCli(paths, ['agy', 'model-missing', '--model']);
+  expectCode(missing, 2, 'missing --model value');
+  assert.match(missing.stderr, /--model requires/);
+  const duplicate = await runCli(paths, ['--model=a', '--model=b', 'agy', 'model-dup', 'fresh', 'x']);
+  expectCode(duplicate, 2, 'duplicate --model');
+  assert.match(duplicate.stderr, /--model may be provided only once/);
+  assert.equal(spawnCount(paths), beforeInvalid);
+}
+
 // This policy owns malformed optional config. The warning is scoped to the tier gate,
 // housekeeping remains available, and fallback retains the tier 3/4 protection.
 {
@@ -1271,6 +1309,34 @@ GOVERNANCE_HARNESS
 governance_out=$(node "$WORK/governance-harness.mjs" "$ROUTE" "$WORK" "$WORK/governance-ledger-worker.mjs" 2>&1); governance_code=$?
 check "governance ledger + tier gate hermetic regression coverage" 0 "$governance_code"
 [ -n "$governance_out" ] && echo "$governance_out"
+
+echo
+echo "== dynamic model selection: 'models' reports pass-through vs raw listings (hermetic fake-PATH) =="
+MODEL_DIR=$(mktemp -d /tmp/route-smoke-models.XXXXXX)
+# agy lists via `agy models`; command-code via `command-code --list-models`. codex and
+# claude-code have no listing command — they are reported as pass-through. The listing
+# output is echoed raw, so any format these fakes print is passed through unchanged.
+cat > "$MODEL_DIR/agy" << 'MODEL_AGY'
+#!/bin/sh
+echo "agy-model-alpha"
+echo "agy-model-beta"
+MODEL_AGY
+cat > "$MODEL_DIR/command-code" << 'MODEL_COMMAND_CODE'
+#!/bin/sh
+echo "command-code-model-x"
+MODEL_COMMAND_CODE
+chmod +x "$MODEL_DIR/agy" "$MODEL_DIR/command-code"
+models_all=$(PATH="$MODEL_DIR:$PATH" node "$ROUTE" models); models_all_code=$?
+check "cli-relay models exits 0" 0 "$models_all_code"
+echo "$models_all" | grep -q "^codex: pass-through" && echo "PASS: codex reported as pass-through" && PASS=$((PASS+1)) || { echo "FAIL: codex not pass-through: $models_all"; FAIL=$((FAIL+1)); }
+echo "$models_all" | grep -q "^claude-code: pass-through" && echo "PASS: claude-code reported as pass-through" && PASS=$((PASS+1)) || { echo "FAIL: claude-code not pass-through: $models_all"; FAIL=$((FAIL+1)); }
+echo "$models_all" | grep -q "agy-model-alpha" && echo "PASS: agy listing echoed raw" && PASS=$((PASS+1)) || { echo "FAIL: agy listing missing: $models_all"; FAIL=$((FAIL+1)); }
+echo "$models_all" | grep -q "command-code-model-x" && echo "PASS: command-code listing echoed raw" && PASS=$((PASS+1)) || { echo "FAIL: command-code listing missing: $models_all"; FAIL=$((FAIL+1)); }
+models_agy=$(PATH="$MODEL_DIR:$PATH" node "$ROUTE" models agy); models_agy_code=$?
+check "cli-relay models agy exits 0" 0 "$models_agy_code"
+echo "$models_agy" | grep -q "agy-model-alpha" && echo "PASS: single-backend listing echoed raw" && PASS=$((PASS+1)) || { echo "FAIL: agy-only listing missing: $models_agy"; FAIL=$((FAIL+1)); }
+echo "$models_agy" | grep -q "command-code-model-x" && { echo "FAIL: models agy leaked command-code output"; FAIL=$((FAIL+1)); } || { echo "PASS: models agy lists only agy"; PASS=$((PASS+1)); }
+rm -rf "$MODEL_DIR"
 
 echo
 echo "== governance audit regressions: resource locks and bounded ledger recovery =="
