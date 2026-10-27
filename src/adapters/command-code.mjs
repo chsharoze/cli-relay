@@ -1,4 +1,5 @@
 import { ENV_BASE } from '../core/adapter-env.mjs';
+import { parseModelListing } from '../core/model-listing.mjs';
 import { parseJsonResult } from '../core/parse-json-result.mjs';
 
 // --trust alone only skips the initial "trust this project" prompt — it does NOT bypass
@@ -10,6 +11,12 @@ import { parseJsonResult } from '../core/parse-json-result.mjs';
 // zai-org/glm-5.2 so existing threads are unaffected). A per-call --model takes precedence
 // over the env override, which in turn takes precedence over the default.
 const DEFAULT_MODEL = 'zai-org/glm-5.2';
+// Every command-code model id is provider/model; `--list-models` also prints headers such
+// as "Available models · 94 models" and group names, which this filters out.
+export function parseCommandCodeModels(text) {
+  return parseModelListing(text).filter((id) => id.includes('/'));
+}
+
 const resolveModel = (model) => model ?? (process.env.CLI_RELAY_COMMAND_CODE_MODEL || DEFAULT_MODEL);
 
 export default {
@@ -25,6 +32,7 @@ export default {
   // Resume remains deliberately unsupported because the seed turn can disappear silently.
   resume: null,
   listModels: () => ['--list-models'],
+  parseModels: parseCommandCodeModels,
   defaultModel: DEFAULT_MODEL,
   modelEnvVar: 'CLI_RELAY_COMMAND_CODE_MODEL',
   // command-code's accepted levels depend on the routed model and its help shows only an

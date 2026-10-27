@@ -79,7 +79,10 @@ function makeFakes() {
   writeFileSync(join(bin, 'agy-models.txt'), `${AGY_LISTING_TEXT}\n`);
   writeFileSync(join(bin, 'claude-help.txt'), `${CLAUDE_HELP_TEXT}\n`);
   writeFileSync(join(bin, 'command-code-help.txt'), `${COMMAND_CODE_HELP_TEXT}\n`);
-  writeFileSync(join(bin, 'command-code-models.txt'), 'deepseek/deepseek-v4.1-flash\nzai-org/glm-5.2\n');
+  writeFileSync(join(bin, 'command-code-models.txt'), [
+    'Available models · 94 models', '', 'Open Source', '  deepseek/deepseek-v4.1-flash  DeepSeek V4.1 Flash',
+    '  zai-org/glm-5.2  GLM 5.2', 'Proprietary:', '  - typesafe/jev',
+  ].join('\n'));
   writeExecutable(join(bin, 'agy'), `echo "agy $*" >> "$(dirname "$0")/calls.log"
 if [ "$1" = models ]; then
   case "$(cat "$(dirname "$0")/agy-models-mode" 2>/dev/null)" in
@@ -178,6 +181,8 @@ try {
   const { DISCOVERY_TIMEOUT_MS, discoveryTimeoutMs } = await import('../src/core/discovery.mjs');
   const { parseCodexModelsCache } = await import('../src/adapters/codex.mjs');
   const { agyEffortModel, agyModelEffort, parseAgyModels } = await import('../src/adapters/agy.mjs');
+  const { parseCommandCodeModels } = await import('../src/adapters/command-code.mjs');
+  const { parseModelListing } = await import('../src/commands/models.mjs');
   const adapterModules = {};
   for (const name of ['codex', 'agy', 'claude-code', 'command-code']) {
     adapterModules[name] = (await import(pathToFileURL(join(ROOT, 'src/adapters', `${name}.mjs`)).href)).default;
@@ -383,6 +388,14 @@ try {
       'by-id': { levels: ['low', 'max'], defaultEffort: null },
       'no-levels': { levels: null, defaultEffort: null },
     });
+  });
+
+  await test('command-code listing parser keeps only provider/model ids; the shared parser is unchanged', () => {
+    const text = 'Available models · 94 models\n\nOpen Source\n  deepseek/deepseek-v4.1-flash  Flash\n' +
+      'Proprietary:\n  - typesafe/jev\nzai-org/glm-5.2\n';
+    assert.deepEqual(parseCommandCodeModels(text), ['deepseek/deepseek-v4.1-flash', 'typesafe/jev', 'zai-org/glm-5.2']);
+    assert.deepEqual(parseModelListing(text),
+      ['Available', 'Open', 'deepseek/deepseek-v4.1-flash', 'typesafe/jev', 'zai-org/glm-5.2']);
   });
 
   await test('agy listing parser drops the progress line and display names', () => {
@@ -687,6 +700,7 @@ try {
       models: [
         { id: 'deepseek/deepseek-v4.1-flash', efforts: null, defaultEffort: null },
         { id: 'zai-org/glm-5.2', efforts: null, defaultEffort: null },
+        { id: 'typesafe/jev', efforts: null, defaultEffort: null },
       ],
     });
     if (process.env.CLI_RELAY_SHOW_SAMPLES) {
