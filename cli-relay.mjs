@@ -51,7 +51,11 @@ import {
   SPAWN_KILL_GRACE_MS,
   SPAWN_TIMEOUT_MS,
 } from './src/config.mjs';
-import { prepareDispatch, resolveDispatchSettings } from './src/core/dispatch-settings.mjs';
+import {
+  prepareDispatch,
+  printBackendConfigWarnings,
+  resolveDispatchSettings,
+} from './src/core/dispatch-settings.mjs';
 import { isEffortLevel } from './src/core/effort.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
@@ -556,6 +560,7 @@ async function main() {
 
   // Resolved before the dry-run branch so a preview runs the same discovery and prints
   // the argv a real dispatch would spawn.
+  printBackendConfigWarnings(adapters);
   const settings = resolveDispatchSettings(backend, adapter, {
     modelFlag: modelValue,
     effortFlag: effortValue,

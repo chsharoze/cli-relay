@@ -1,5 +1,5 @@
 import { EXPECTED_BACKENDS } from '../adapter-loader.mjs';
-import { resolveDispatchSettings } from '../core/dispatch-settings.mjs';
+import { printBackendConfigWarnings, resolveDispatchSettings } from '../core/dispatch-settings.mjs';
 
 export const USAGE_LINES = Object.freeze([
   'cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] ' +
@@ -81,5 +81,6 @@ export function helpText(adapters) {
 }
 
 export function cmdHelp(adapters) {
+  printBackendConfigWarnings(adapters);
   console.log(helpText(adapters));
 }

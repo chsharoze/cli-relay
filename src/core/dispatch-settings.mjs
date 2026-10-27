@@ -1,12 +1,31 @@
+import { BACKEND_DEFAULTS, BACKEND_DEFAULTS_WARNINGS } from '../config.mjs';
 import { discoverText } from './discovery.mjs';
 import { RelayError } from './errors.mjs';
 
+// Config warnings: shape problems found while loading config.json, plus entries naming a
+// backend no adapter provides. Dispatch and help print each once.
+export function backendConfigWarnings(adapters) {
+  const warnings = [...BACKEND_DEFAULTS_WARNINGS];
+  for (const name of Object.keys(BACKEND_DEFAULTS)) {
+    if (!adapters[name]) {
+      warnings.push(`config backends.${name}: no backend named "${name}"; ignoring it`);
+    }
+  }
+  return warnings;
+}
+
+export function printBackendConfigWarnings(adapters) {
+  for (const warning of backendConfigWarnings(adapters)) console.error(`warning: ${warning}`);
+}
+
 // Resolves the model and effort one dispatch will use, highest first:
-//   model:  --model, then the adapter's `modelEnvVar` when set and non-empty;
-//   effort: --effort.
+//   model:  --model, then the adapter's `modelEnvVar` when set and non-empty, then
+//           config backends.<name>.model;
+//   effort: --effort, then config backends.<name>.effort.
 // Anything unresolved stays undefined, so the adapter keeps its own built-in default and
 // its argv is unchanged.
-export function resolveDispatchSettings(_name, adapter, { modelFlag, effortFlag } = {}) {
+export function resolveDispatchSettings(name, adapter, { modelFlag, effortFlag } = {}) {
+  const configured = BACKEND_DEFAULTS[name] ?? {};
   let model = modelFlag;
   let modelSource = modelFlag !== undefined ? 'flag' : null;
   const envValue = adapter.modelEnvVar ? process.env[adapter.modelEnvVar] : undefined;
@@ -14,12 +33,17 @@ export function resolveDispatchSettings(_name, adapter, { modelFlag, effortFlag 
     model = envValue;
     modelSource = 'env';
   }
-  return {
-    model,
-    modelSource,
-    effort: effortFlag,
-    effortSource: effortFlag !== undefined ? 'flag' : null,
-  };
+  if (model === undefined && configured.model !== undefined) {
+    model = configured.model;
+    modelSource = 'config';
+  }
+  let effort = effortFlag;
+  let effortSource = effortFlag !== undefined ? 'flag' : null;
+  if (effort === undefined && configured.effort !== undefined) {
+    effort = configured.effort;
+    effortSource = 'config';
+  }
+  return { model, modelSource, effort, effortSource };
 }
 
 // Applies an adapter's optional dispatch-time effort hook. The hook may change the model
