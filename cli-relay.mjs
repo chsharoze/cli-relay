@@ -496,7 +496,9 @@ async function main() {
     await cmdPick(adapters, cliArgs.slice(1).join(' '));
     return;
   }
-  if (cliArgs.length === 1 && ['help', '--help', '-h'].includes(cliArgs[0])) {
+  // `help` ignores any further arguments, as it always has; `--help`/`-h` count only alone,
+  // since a lone flag otherwise reaches dispatch parsing.
+  if (cliArgs[0] === 'help' || (cliArgs.length === 1 && ['--help', '-h'].includes(cliArgs[0]))) {
     cmdHelp(adapters);
     return;
   }

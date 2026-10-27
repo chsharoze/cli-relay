@@ -719,6 +719,10 @@ try {
     }
     const extra = run(['--help', 'codex']);
     assert.equal(extra.code, 2);
+    const helpExtra = run(['help', 'codex', '--json'], { home });
+    assert.equal(helpExtra.code, 0);
+    assert.ok(helpExtra.out.includes('Choosing an effort'));
+    assert.deepEqual(helpExtra.calls, []);
   });
 
   await test('cli-relay models --json matches the documented shape', () => {
