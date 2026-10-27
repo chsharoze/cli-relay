@@ -346,6 +346,27 @@ try {
     }
   });
 
+  await test('a refused dry run or resume spawns no discovery', () => {
+    const inFlight = { ...confirmedSession('agy'), status: 'running', run_started_iso: new Date().toISOString() };
+    const home = makeHome({ sessions: { busy: inFlight, other: confirmedSession('codex') } });
+    const cases = [
+      [['--effort', 'high', 'agy', 'missing', 'resume', 'p'], /no confirmed session/],
+      [['--effort', 'high', 'agy', 'busy', 'fresh', 'p'], /already in flight/],
+      [['--effort', 'high', 'agy', 'other', 'fresh', 'p'], /belongs to backend "codex"/],
+    ];
+    for (const [args, message] of cases) {
+      for (const dry of [true, false]) {
+        const result = run([...(dry ? ['--print-command'] : []), ...args], { home });
+        assert.equal(result.code, 1, result.err);
+        assert.match(result.err, message);
+        assert.deepEqual(result.calls, [], `${dry ? 'dry' : 'real'} ${args.join(' ')} spawned ${result.calls}`);
+      }
+    }
+    const ledger = readFileSync(join(home, '.cli-relay', 'ledger.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(ledger.length, 3, 'real refused attempts stay auditable');
+    assert.ok(ledger.every((entry) => entry.outcome === 'failed' && entry.model === null && entry.effort === null));
+  });
+
   // --- parsers ---
   await test('help-text parser handles the agy, claude, command-code and no-option fixtures', () => {
     assert.deepEqual(parseEffortHelp(AGY_HELP_TEXT), ['low', 'medium', 'high', 'xhigh', 'max']);

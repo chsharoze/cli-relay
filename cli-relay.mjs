@@ -443,7 +443,7 @@ function sessionForInvocation(map, backend, thread, mode, adapter) {
 // same cases a real run would refuse (found in review: dry-run intentionally skips the
 // lock, but that means it also silently skipped this check, printing a preview for a
 // command that would actually be refused).
-function assertNotInFlight(session, thread) {
+function assertNotInFlight(session, thread, { warnStale = true } = {}) {
   if (session.status !== 'running') return;
   const ageMs = Date.now() - Date.parse(session.run_started_iso || 0);
   if (Number.isFinite(ageMs) && ageMs < LOCK_STALE_MS) {
@@ -453,6 +453,7 @@ function assertNotInFlight(session, thread) {
       `${session.run_started_iso}) — refusing a concurrent turn on the same native session`,
     );
   }
+  if (!warnStale) return;
   console.error(
     `warning: thread "${thread}" was left mid-run (started ${session.run_started_iso}, ` +
     `stale) — the previous invocation likely crashed. Proceeding from its last confirmed id.`,
@@ -559,23 +560,19 @@ async function main() {
     throw new RelayError('TIER_CONFIRMATION_REQUIRED', gate.reason);
   }
 
-  // Resolved before the dry-run branch so a preview runs the same discovery and prints
-  // the argv a real dispatch would spawn.
   printBackendConfigWarnings(adapters);
   const settings = resolveDispatchSettings(backend, adapter, {
     modelFlag: modelValue,
     effortFlag: effortValue,
   });
-  const { model, effort, effortUsed } = await prepareDispatch(backend, adapter, settings);
-  // What the call actually runs with, for the ledger and the session map: the resolved
-  // model or, when none was resolved, the adapter's declared built-in default.
-  const recordedModel = model ?? adapter.defaultModel ?? null;
-  const recordedEffort = effortUsed ?? null;
 
   if (dryRun) {
     const map = loadMap();
     const session = sessionForInvocation(map, backend, thread, mode, adapter);
     assertNotInFlight(session, thread);
+    // The same discovery a real dispatch runs, so the printed argv is the real one; it
+    // runs only after the refusals above, so a refused preview spawns nothing.
+    const { model, effort } = await prepareDispatch(backend, adapter, settings);
     const augmentedPrompt = buildPinnedBlock(session.pinned_facts) + prompt;
     const argv = mode === 'resume'
       ? adapter.resume(session.native_session_id, augmentedPrompt, model, modeValue, effort)
@@ -593,11 +590,25 @@ async function main() {
     tier: tier.level,
     tier_name: tier.name,
     gate_allowed: true,
-    model: recordedModel,
-    effort: recordedEffort,
+    model: null,
+    effort: null,
   };
 
   try {
+
+  // Read-only pre-check of the same refusals critical section 1 enforces, so a call that
+  // will be refused (unconfirmed resume, run in flight, wrong backend, cwd mismatch) never
+  // spawns discovery. Critical section 1 re-checks under the lock and stays authoritative.
+  assertNotInFlight(
+    sessionForInvocation(loadMap(), backend, thread, mode, adapter), thread, { warnStale: false },
+  );
+  const { model, effort, effortUsed } = await prepareDispatch(backend, adapter, settings);
+  // What the call actually runs with, for the ledger and the session map: the resolved
+  // model or, when none was resolved, the adapter's declared built-in default.
+  const recordedModel = model ?? adapter.defaultModel ?? null;
+  const recordedEffort = effortUsed ?? null;
+  ledgerEntry.model = recordedModel;
+  ledgerEntry.effort = recordedEffort;
 
   // Critical section 1: validate and mark running before spawn.
   const record = await withLock(() => {
