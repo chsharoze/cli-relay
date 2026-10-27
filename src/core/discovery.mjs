@@ -53,10 +53,11 @@ export function runListing(binary, args, { timeoutMs } = {}) {
   });
 }
 
-// One bounded discovery read. Returns the command's stdout (plus stderr when asked, for
-// help text that some CLIs print there), or null after printing exactly one `warning:`
-// line when it fails to spawn, times out, or exits non-zero. Never throws.
-export async function discoverText(binary, args, { includeStderr = false } = {}) {
+// One bounded discovery read. Resolves to `{ text }` with the command's stdout (plus stderr
+// when asked, for help text some CLIs print there), or to `{ text: null, reason }` after
+// printing exactly one `warning:` line when it fails to spawn, times out, or exits
+// non-zero. Never throws.
+export async function discover(binary, args, { includeStderr = false } = {}) {
   const label = [binary, ...args].join(' ');
   let result;
   try {
@@ -64,13 +65,16 @@ export async function discoverText(binary, args, { includeStderr = false } = {})
   } catch (error) {
     result = { error };
   }
-  if (result.error) {
-    console.error(`warning: discovery "${label}" failed (${result.error.message}); continuing without it`);
-    return null;
+  let reason = null;
+  if (result.error) reason = result.error.message;
+  else if (result.code !== 0) reason = `exited ${result.code}`;
+  if (reason) {
+    console.error(`warning: discovery "${label}" failed (${reason}); continuing without it`);
+    return { text: null, reason };
   }
-  if (result.code !== 0) {
-    console.error(`warning: discovery "${label}" exited ${result.code}; continuing without it`);
-    return null;
-  }
-  return includeStderr && result.err ? `${result.out}\n${result.err}` : result.out;
+  return { text: includeStderr && result.err ? `${result.out}\n${result.err}` : result.out };
+}
+
+export async function discoverText(binary, args, options) {
+  return (await discover(binary, args, options)).text;
 }

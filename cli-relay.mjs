@@ -7,7 +7,7 @@
  *     [--mode <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
- *   cli-relay models [backend]
+ *   cli-relay models [backend] [--json]
  *   cli-relay pick '<task>'
  *   cli-relay audit verify
  *   cli-relay reset <thread>
@@ -17,6 +17,7 @@
  *   cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend>
  *     --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]
  *   cli-relay loop check <thread> [--plan <path>] [--repo <path>]
+ *   cli-relay help | --help | -h
  *
  * Dispatch flags must precede the mode argument. They may be interspersed among
  * backend/thread/mode; every token after mode is literal prompt text.
@@ -33,6 +34,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { cmdAuditVerify } from './src/commands/audit.mjs';
 import { cmdDoctor } from './src/commands/doctor.mjs';
+import { cmdHelp, USAGE_LINES } from './src/commands/help.mjs';
 import { cmdList } from './src/commands/list.mjs';
 import { cmdLoopCheck, cmdLoopRecord } from './src/commands/loop.mjs';
 import { cmdModels } from './src/commands/models.mjs';
@@ -233,25 +235,7 @@ async function runHousekeeping(cliArgs) {
 }
 
 function printUsage(backends) {
-  console.error(
-    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] ' +
-    '[--effort <level>] [--mode <name>] [--confirm] ' +
-    '<backend> <thread> <fresh|resume> <prompt...>',
-  );
-  console.error('       cli-relay list');
-  console.error('       cli-relay doctor');
-  console.error('       cli-relay models [backend]');
-  console.error("       cli-relay pick '<task>'");
-  console.error('       cli-relay audit verify');
-  console.error('       cli-relay reset <thread>');
-  console.error('       cli-relay pin <thread> "<fact>"');
-  console.error('       cli-relay unpin <thread> <index>');
-  console.error('       cli-relay pins <thread>');
-  console.error(
-    '       cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> ' +
-    '--verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]',
-  );
-  console.error('       cli-relay loop check <thread> [--plan <path>] [--repo <path>]');
+  USAGE_LINES.forEach((line, index) => console.error(`${index === 0 ? 'usage:' : '      '} ${line}`));
   console.error('dispatch flags must precede <fresh|resume>; all following tokens are prompt text');
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
@@ -499,16 +483,15 @@ async function main() {
     return;
   }
   if (cliArgs[0] === 'models') {
-    await cmdModels(adapters, cliArgs[1]);
+    await cmdModels(adapters, cliArgs.slice(1));
     return;
   }
   if (cliArgs[0] === 'pick') {
     await cmdPick(adapters, cliArgs.slice(1).join(' '));
     return;
   }
-  if (cliArgs[0] === 'help') {
-    printUsage(adapters);
-    process.exitCode = 0;
+  if (cliArgs.length === 1 && ['help', '--help', '-h'].includes(cliArgs[0])) {
+    cmdHelp(adapters);
     return;
   }
 

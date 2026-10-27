@@ -1,12 +1,22 @@
 import { discoverText } from './discovery.mjs';
 import { RelayError } from './errors.mjs';
 
-// Resolves the model and effort one dispatch will use. Flag values win; with neither flag
-// the model and effort stay undefined so every adapter produces its unchanged argv.
-export function resolveDispatchSettings(_name, _adapter, { modelFlag, effortFlag } = {}) {
+// Resolves the model and effort one dispatch will use, highest first:
+//   model:  --model, then the adapter's `modelEnvVar` when set and non-empty;
+//   effort: --effort.
+// Anything unresolved stays undefined, so the adapter keeps its own built-in default and
+// its argv is unchanged.
+export function resolveDispatchSettings(_name, adapter, { modelFlag, effortFlag } = {}) {
+  let model = modelFlag;
+  let modelSource = modelFlag !== undefined ? 'flag' : null;
+  const envValue = adapter.modelEnvVar ? process.env[adapter.modelEnvVar] : undefined;
+  if (model === undefined && envValue) {
+    model = envValue;
+    modelSource = 'env';
+  }
   return {
-    model: modelFlag,
-    modelSource: modelFlag !== undefined ? 'flag' : null,
+    model,
+    modelSource,
     effort: effortFlag,
     effortSource: effortFlag !== undefined ? 'flag' : null,
   };
