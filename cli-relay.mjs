@@ -49,6 +49,7 @@ import {
   SPAWN_KILL_GRACE_MS,
   SPAWN_TIMEOUT_MS,
 } from './src/config.mjs';
+import { prepareDispatch, resolveDispatchSettings } from './src/core/dispatch-settings.mjs';
 import { isEffortLevel } from './src/core/effort.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
@@ -570,14 +571,22 @@ async function main() {
     throw new RelayError('TIER_CONFIRMATION_REQUIRED', gate.reason);
   }
 
+  // Resolved before the dry-run branch so a preview runs the same discovery and prints
+  // the argv a real dispatch would spawn.
+  const settings = resolveDispatchSettings(backend, adapter, {
+    modelFlag: modelValue,
+    effortFlag: effortValue,
+  });
+  const { model, effort } = await prepareDispatch(backend, adapter, settings);
+
   if (dryRun) {
     const map = loadMap();
     const session = sessionForInvocation(map, backend, thread, mode, adapter);
     assertNotInFlight(session, thread);
     const augmentedPrompt = buildPinnedBlock(session.pinned_facts) + prompt;
     const argv = mode === 'resume'
-      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue, modeValue, effortValue)
-      : adapter.fresh(augmentedPrompt, modelValue, modeValue, effortValue);
+      ? adapter.resume(session.native_session_id, augmentedPrompt, model, modeValue, effort)
+      : adapter.fresh(augmentedPrompt, model, modeValue, effort);
     console.log(JSON.stringify(argv));
     return;
   }
@@ -635,8 +644,8 @@ async function main() {
 
   const augmentedPrompt = buildPinnedBlock(record.pinned_facts) + prompt;
   const argv = mode === 'resume'
-    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue, modeValue, effortValue)
-    : adapter.fresh(augmentedPrompt, modelValue, modeValue, effortValue);
+    ? adapter.resume(record.native_session_id, augmentedPrompt, model, modeValue, effort)
+    : adapter.fresh(augmentedPrompt, model, modeValue, effort);
   const env = scrubEnv(adapter.env);
   const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
   if (outputOverflow) {

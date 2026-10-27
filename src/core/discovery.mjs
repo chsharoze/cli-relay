@@ -1,0 +1,76 @@
+import { spawn } from 'node:child_process';
+import { ENV_BASE } from './adapter-env.mjs';
+import { scrubEnv } from './env.mjs';
+import { killProcessTree } from './process-tree.mjs';
+
+// Discovery spawns read a backend's own listing or help text; they never dispatch. A
+// backend that hangs must not hang cli-relay, so every discovery spawn is bounded. The
+// bound is overridable through the environment so tests can exercise it quickly.
+export const DISCOVERY_TIMEOUT_MS = 15_000;
+
+export function discoveryTimeoutMs() {
+  const override = Number(process.env.CLI_RELAY_DISCOVERY_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : DISCOVERY_TIMEOUT_MS;
+}
+
+// Spawns a backend's listing or help command with the scrubbed base env. With a timeout,
+// a child still running at the deadline is killed with its process group and the result
+// is `{ error }` with `timedOut: true`; its pipes are released so a lingering grandchild
+// cannot keep this process alive.
+export function runListing(binary, args, { timeoutMs } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(binary, args, {
+      env: scrubEnv(ENV_BASE),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: timeoutMs != null && process.platform !== 'win32',
+    });
+    let out = '';
+    let err = '';
+    let settled = false;
+    let timer = null;
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    child.stderr.on('data', (chunk) => { err += chunk; });
+    child.on('error', (error) => settle({ error }));
+    child.on('close', (code) => settle({ code, out, err }));
+    if (timeoutMs != null) {
+      timer = setTimeout(() => {
+        if (child.pid) killProcessTree(child.pid, 'SIGKILL');
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        settle({
+          error: new Error(`timed out after ${timeoutMs / 1000}s`),
+          timedOut: true,
+        });
+      }, timeoutMs);
+    }
+  });
+}
+
+// One bounded discovery read. Returns the command's stdout (plus stderr when asked, for
+// help text that some CLIs print there), or null after printing exactly one `warning:`
+// line when it fails to spawn, times out, or exits non-zero. Never throws.
+export async function discoverText(binary, args, { includeStderr = false } = {}) {
+  const label = [binary, ...args].join(' ');
+  let result;
+  try {
+    result = await runListing(binary, args, { timeoutMs: discoveryTimeoutMs() });
+  } catch (error) {
+    result = { error };
+  }
+  if (result.error) {
+    console.error(`warning: discovery "${label}" failed (${result.error.message}); continuing without it`);
+    return null;
+  }
+  if (result.code !== 0) {
+    console.error(`warning: discovery "${label}" exited ${result.code}; continuing without it`);
+    return null;
+  }
+  return includeStderr && result.err ? `${result.out}\n${result.err}` : result.out;
+}

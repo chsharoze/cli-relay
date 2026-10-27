@@ -1,28 +1,14 @@
-import { spawn } from 'node:child_process';
 import { EXPECTED_BACKENDS } from '../adapter-loader.mjs';
-import { ENV_BASE } from '../core/adapter-env.mjs';
-import { scrubEnv } from '../core/env.mjs';
+import { runListing } from '../core/discovery.mjs';
 import { RelayError } from '../core/errors.mjs';
+import { parseModelListing } from '../core/model-listing.mjs';
 import { realWhichCheck, resolveBinaryName } from './doctor.mjs';
 
 // Each adapter either exposes a native listing command (agy: `models`, command-code:
 // `--list-models`) or accepts any model name with no way to enumerate them (codex,
-// claude-code). The output format of a listing command is backend-owned and not parsed
-// here — it is echoed raw so it can't drift out of sync with the backend.
-export function runListing(binary, args) {
-  return new Promise((resolve) => {
-    const child = spawn(binary, args, {
-      env: scrubEnv(ENV_BASE),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (chunk) => { out += chunk; });
-    child.stderr.on('data', (chunk) => { err += chunk; });
-    child.on('error', (error) => resolve({ error }));
-    child.on('close', (code) => resolve({ code, out, err }));
-  });
-}
+// claude-code). The spawn and the listing parser live in core/ so adapters can use them;
+// both are re-exported here because existing callers import them from this module.
+export { parseModelListing, runListing };
 
 // Runs a backend's own listing command. Returns a discriminated result so callers can
 // format it (cmdModels) or turn it into candidates (pick) without re-implementing binary
@@ -37,24 +23,6 @@ export async function listBackendModels(name, adapter, isAvailable = realWhichCh
   const result = await runListing(binary, adapter.listModels());
   if (result.error) return { kind: 'unavailable', reason: result.error.message };
   return { kind: 'listing', out: result.out, err: result.err, code: result.code };
-}
-
-// Model names are extracted one per non-empty line: strip common list markers and an
-// optional description column, drop section headers (trailing ":"), and de-duplicate.
-// Listing formats are backend-owned, so this is a permissive best-effort parse.
-export function parseModelListing(text) {
-  const names = [];
-  const seen = new Set();
-  for (const rawLine of text.split('\n')) {
-    let line = rawLine.trim();
-    if (!line || line.endsWith(':')) continue;
-    line = line.replace(/^[-*•]\s+/, '');
-    const token = line.split(/\s+/)[0];
-    if (!token || !/[A-Za-z]/.test(token) || seen.has(token)) continue;
-    seen.add(token);
-    names.push(token);
-  }
-  return names;
 }
 
 export async function cmdModels(adapters, backend) {

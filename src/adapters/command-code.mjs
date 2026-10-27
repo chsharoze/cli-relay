@@ -25,6 +25,11 @@ export default {
   // Resume remains deliberately unsupported because the seed turn can disappear silently.
   resume: null,
   listModels: () => ['--list-models'],
+  defaultModel: DEFAULT_MODEL,
+  modelEnvVar: 'CLI_RELAY_COMMAND_CODE_MODEL',
+  // command-code's accepted levels depend on the routed model and its help shows only an
+  // example list, so effort is always passed through and its help is never parsed.
+  efforts: () => ({ levels: null, perModel: null, source: 'model-dependent, passed through' }),
   env: ENV_BASE,
   parse: (stdout) => parseJsonResult(stdout, { id: 'sessionId', answer: 'finalText' }),
   checkCompaction: (_id, stdout) =>
