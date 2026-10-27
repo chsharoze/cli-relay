@@ -1530,6 +1530,11 @@ check "shared ledger aliases and suspended writers serialize without stale links
 node "$(dirname "$ROUTE")/tests/ledger-data-regressions.mjs"
 check "proto-named fields and bounded delimiter-corruption recovery" 0 "$?"
 
+echo
+echo "== --effort, model/effort menu, help, backend config defaults, recording (hermetic) =="
+node "$(dirname "$ROUTE")/tests/effort.mjs" > /dev/null
+check "effort flag, discovery, menu, help, config defaults and recording" 0 "$?"
+
 rm -rf "$FAKE_DIR" "$WORK"
 
 echo
