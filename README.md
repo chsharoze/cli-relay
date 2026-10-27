@@ -317,7 +317,8 @@ binary names `doctor` tries — most adapters only need one, but a backend that 
 more than one binary name can list several). Optional menu and effort hooks: `listModels`
 and `parseModels` (listing command and its parser), `efforts()` (levels for
 `cli-relay models`), `prepareEffort()` (dispatch-time effort check or rewrite),
-`defaultModel` (display and recording only) and `modelEnvVar`. `effort` is undefined unless a
+`defaultModel` (display and recording only), `modelEffort` (the effort a model id embeds,
+for display) and `modelEnvVar`. `effort` is undefined unless a
 flag or config sets it, and must then produce no argument. Housekeeping commands are dispatched before
 adapter discovery, so they remain available if an adapter cannot be loaded. A malformed
 adapter file no longer takes down the whole load either way: a broken file matching one of
@@ -811,6 +812,10 @@ repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
   that env override, which in turn takes precedence over a `backends` config default and
   then the built-in default; `--effort <level>` is passed through to command-code unchecked,
   since its accepted levels depend on the routed model.
+- `cli-relay pick` still spawns its model listings through the original, unbounded
+  `listBackendModels` path, without the 15 s discovery timeout that `cli-relay models` and
+  dispatch-time discovery use — deliberately left unchanged when `--effort` was added, so a
+  hanging listing can still hang `pick`.
 - `claude-code` calls hit real Anthropic billing against the Pro plan (confirmed ~$0.07-0.13
   per short test call) — not free the way codex/agy effectively are for testing.
 - Grandchild processes that double-fork/setsid out of a backend's process group would survive
