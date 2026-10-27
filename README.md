@@ -49,10 +49,12 @@ installing any of them confirms cli-relay can see it):
 ## Usage
 
 ```
-cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
+cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--effort <level>] \
+  [--mode <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
+cli-relay help | --help | -h
 cli-relay list
 cli-relay doctor
-cli-relay models [backend]
+cli-relay models [backend] [--json]
 cli-relay pick '<task>'
 cli-relay audit verify
 cli-relay reset <thread>
@@ -70,7 +72,8 @@ cli-relay loop check <thread> [--plan <path>] [--repo <path>] [--quiet]
 Backends: `codex`, `agy`, `claude-code`, `command-code` (command-code is fresh-only —
 its resume showed a reproducible seed-turn bug live, see file header).
 
-Dispatch flags (`--tier`, `--model`, `--confirm`, `--dry-run`, and `--print-command`) must
+Dispatch flags (`--tier`, `--model`, `--effort`, `--mode`, `--confirm`, `--dry-run`, and
+`--print-command`) must
 appear before, or interspersed among, the three routing arguments `<backend> <thread>
 <fresh|resume>`. The mode argument ends flag parsing: every token after `fresh` or
 `resume` is literal prompt text, even if it looks like a flag. For example:
@@ -84,10 +87,90 @@ cli-relay agy discuss fresh explain --confirm and --tier=irreversible
 `--model <name>` (or `--model=<name>`) selects the backend's model for that call. There is
 no cli-relay-side model table — the name is passed through verbatim, so a backend that
 doesn't recognize it fails the call as it normally would; `cli-relay models` shows each
-backend's available names where the backend exposes a listing command (agy, command-code),
-and reports "pass-through" for the ones that accept any name but can list none (codex,
-claude-code). When `--model` is omitted each adapter keeps its own default. Because the
-model is a routing flag, a prompt containing the literal token `--model` cannot change it.
+backend's available names where the backend exposes them (agy and command-code through
+their listing commands, codex through its local model cache), and reports "pass-through"
+for a backend that accepts any name but can list none (claude-code, and codex without a
+cache). When `--model` is omitted the model comes from the backend's config default (see
+Configuration below), else each adapter keeps its own default. Because the model is a
+routing flag, a prompt containing the literal token `--model` cannot change it.
+
+`--effort <level>` (or `--effort=<level>`) selects the reasoning effort for that call, under
+the same rules as `--model`: before the mode argument only, at most once, and with a value.
+The level must be lowercase letters (`^[a-z]+$`) or the call is a usage error (exit 2)
+before anything spawns. There is no cli-relay-side table of levels either; each adapter
+turns the level into its backend's own argument:
+
+| backend | argv | levels known from |
+|---|---|---|
+| codex | `-c model_reasoning_effort=<level>` (fresh and resume) | codex's local model cache, per model |
+| agy | `--effort <level>`, or an effort-suffixed model id (below) | `agy --help` |
+| claude-code | `--effort <level>` | `claude --help` |
+| command-code | `--effort <level>` | not exposed (model-dependent): always passed through |
+
+Validation at dispatch is deliberately cheap. codex checks the level against the resolved
+model's levels in `~/.codex/models_cache.json` (`$CODEX_HOME` when set) and exits 2 naming
+the allowed values when it is not listed; a model missing from the cache, or a missing or
+unreadable cache, passes the level through. agy and claude-code validate effort themselves
+and fail loudly, so cli-relay never runs their help at dispatch. Without `--effort` (and
+without a configured effort) no effort argument is passed and every backend's argv is
+exactly what it was before the flag existed.
+
+**agy and effort-suffixed model ids.** agy model ids carry an effort suffix
+(`gemini-3.8-flash-medium`, `gemini-4-argon-low`, `claude-sonnet-5-5-high`) and agy also
+accepts `--effort`. When an effort is given for agy, cli-relay looks at the model the call
+would use, including the built-in default:
+- an id ending in `-low`, `-medium`, `-high`, `-xhigh` or `-max` triggers a live
+  `agy models` listing; if the same id with the suffix swapped for the requested level is
+  listed, that id is used and no `--effort` is passed (`gemini-3.8-flash-medium` with
+  `--effort high` becomes `gemini-3.8-flash-high`);
+- if the swapped id is not listed, the id is kept, `--effort <level>` is added, and one
+  `warning:` line goes to stderr;
+- if the listing is unavailable (error or timeout), nothing is swapped: the id is kept and
+  `--effort <level>` is added, with no warning beyond the discovery warning;
+- an id without an effort suffix just gets `--effort <level>`.
+
+The rule lives in one exported function, `agyEffortModel` in `src/adapters/agy.mjs`.
+
+**Discovery.** Every discovery spawn (the agy listing above, and the listings and help reads
+in `cli-relay models`) runs with the same scrubbed environment as the listing commands and
+a 15 s timeout. A timeout or error produces one `warning:` line and an unknown value; it
+never fails the command.
+
+`cli-relay models [backend] [--json]` is the live capability menu. For each backend (run
+concurrently) it reports its status (`listing`, `pass-through` or `unavailable`), the effort
+levels it accepts and where they came from, and for each model its levels and default effort
+where known — all discovered from the backend at run time, never from a table in cli-relay.
+codex's models and per-model levels come from its model cache (codex has no listing
+command); agy's and claude-code's levels come from the `--effort` line of their `--help`
+text; command-code's are reported as model-dependent and its help is not parsed. `--json`
+prints exactly this shape:
+
+```json
+{ "<backend>": { "status": "listing" | "pass-through" | "unavailable", "reason": "string or null", "source": "string or null", "efforts": ["..."], "models": [ { "id": "...", "efforts": ["..."], "defaultEffort": "..." } ] } }
+```
+
+with `efforts`/`defaultEffort` null where unknown and `models` null for pass-through.
+
+`cli-relay help` (also `--help` or `-h` as the only argument) prints to stdout: the usage
+lines, one line per dispatch flag, the model and effort a call with no `--model`/`--effort`
+would use on each backend and where each comes from (env, config, or built-in), and this
+guide for choosing an effort. It spawns no backend; `cli-relay models` is the live menu.
+
+```
+Choosing an effort (--effort <level>). A starting point, not a rule.
+  low     lookups, mechanical edits of any size, answering from text you pass in
+  medium  reviews of a known diff, builds against a clear spec that you will review
+  high    debugging without a known cause, concurrency, architecture, any change
+          whose correctness you cannot check by reading the output, and builds
+          nobody will review before they ship
+  xhigh+  only after a high run came back shallow or wrong
+Higher levels cost time (and money on metered backends); defaults differ per
+backend, see the table above. A precise prompt at low beats a vague one at max.
+Levels vary by backend and model (`cli-relay models`); if a backend rejects a
+level, retry without --effort.
+```
+
+("The table above" is the per-backend defaults table `cli-relay help` prints just before it.)
 
 The first two examples above declare and confirm tier 4. The third remains at the default
 tier 1 and passes `explain --confirm and --tier=irreversible` to the backend unchanged. In
@@ -104,8 +187,11 @@ gate catches "nothing works here" without punishing "not everything installed". 
 adapters are reported in its output but don't affect the exit code (they're optional by
 definition). `--dry-run` /
 `--print-command` prints the exact argv
-that would be spawned (prompt fully assembled, pins injected) without spawning anything or
-touching the session map at all — it enforces the same refusals a real run would (e.g. won't
+that would be spawned (prompt fully assembled, pins injected, model and effort resolved)
+without dispatching anything or touching the session map at all. It runs the same discovery
+as a real call so the printed argv is the real one, which means a dry run may run a backend's
+listing or help command (today only `agy models`, for the agy effort rule) — never a
+dispatch — and still writes no state. It enforces the same refusals a real run would (e.g. won't
 preview a `resume` on an unconfirmed thread, won't preview against a thread with a run
 already in flight), so what it shows is genuinely what would happen, not a best-effort guess.
 
@@ -127,7 +213,10 @@ Dispatches default to tier 1 (`read-only`). `--tier` also accepts `local` (2),
 `--tier=<value>`. Tiers 3 and 4 require `--confirm`; otherwise cli-relay refuses before
 spawning the backend. `--dry-run` enforces the same gate but remains a state-free preview.
 
-Every real dispatch attempt is recorded in a SHA-256 hash-chained JSON Lines ledger. Run
+Every real dispatch attempt is recorded in a SHA-256 hash-chained JSON Lines ledger. An
+attempt that passes the tier gate also records the `model` and `effort` it used (null when
+none); the session entry keeps the same values as `last_model` and `last_effort`. Older
+entries without these fields still verify. Run
 `cli-relay audit verify` to check it on demand; the command exits 0 for an intact chain and
 1 with the exact first broken entry for a corrupt chain. Verification is deliberately never
 performed while appending, so old corruption cannot block a new backend call or the diagnostic
@@ -163,6 +252,23 @@ example `SPAWN_TIMEOUT_MS` or `spawnTimeoutMs`. Available settings are defined i
 `src/config.mjs`; derived values such as the lock path and stale-lock window always follow
 their configured base values. The session map and governance ledger paths are independently
 configurable as `MAP_PATH` and `LEDGER_PATH`.
+
+An optional `backends` object sets each backend's default model and effort, so you can pick
+your own defaults without editing an adapter:
+
+```json
+{ "backends": { "codex": { "model": "gpt-6.1-sol", "effort": "low" }, "command-code": { "model": "deepseek/deepseek-v4.1-flash" } } }
+```
+
+Each entry maps a backend name to `{ "model"?: non-empty string, "effort"?: ^[a-z]+$ }`.
+Resolution, highest first — model: `--model`, then the adapter's model environment variable
+when set and non-empty (command-code: `CLI_RELAY_COMMAND_CODE_MODEL`), then
+`backends.<name>.model`, then the adapter's built-in default; effort: `--effort`, then
+`backends.<name>.effort`, then none (no effort argument). A configured codex effort that the
+model cache rules out is dropped with a warning rather than failing the call. Unknown backend
+names, unknown keys and malformed values are reported once each as `warning:` lines (by
+dispatch and `cli-relay help`) and ignored; one bad entry never fails a command. With no
+`backends` key nothing changes. `cli-relay help` shows the effective defaults.
 
 Ledger writers share a lock derived from the ledger's canonical path, independently
 of their session-map paths. Symlink aliases are supported; hard-linked ledger files
@@ -200,10 +306,14 @@ Built-in adapters live in `src/adapters/` and are discovered at runtime. Additio
 `name` as a built-in replaces it. Note that `.js` files load as CommonJS unless a
 `~/.cli-relay/package.json` sets `"type": "module"` — write ESM adapters as `.mjs` (an
 ESM-syntax `.js` file fails to load and is skipped with a warning). Each adapter provides
-`fresh`, optional `resume`, `env`, `parse`, optional `checkCompaction`, and optional
-`binaryCandidates` (an ordered list of
+`fresh(prompt, model, mode, effort)`, optional `resume(id, prompt, model, mode, effort)`,
+`env`, `parse`, optional `checkCompaction`, and optional `binaryCandidates` (an ordered list of
 binary names `doctor` tries — most adapters only need one, but a backend that ships under
-more than one binary name can list several). Housekeeping commands are dispatched before
+more than one binary name can list several). Optional menu and effort hooks: `listModels`
+and `parseModels` (listing command and its parser), `efforts()` (levels for
+`cli-relay models`), `prepareEffort()` (dispatch-time effort check or rewrite),
+`defaultModel` (display and recording only) and `modelEnvVar`. `effort` is undefined unless a
+flag or config sets it, and must then produce no argument. Housekeeping commands are dispatched before
 adapter discovery, so they remain available if an adapter cannot be loaded. A malformed
 adapter file no longer takes down the whole load either way: a broken file matching one of
 the four required backend names (`codex`/`agy`/`claude-code`/`command-code`) is recorded and
@@ -227,13 +337,18 @@ lives under `src/`:
   (case-insensitive substring match, either direction, up to 3 candidates — not a fuzzy-
   distance algorithm, and it only fires when the thread doesn't exist at all, never when it
   exists but is merely unconfirmed).
+- `src/core/discovery.mjs`, `src/core/effort.mjs`, `src/core/model-listing.mjs`,
+  `src/core/dispatch-settings.mjs` — bounded discovery spawns, the `--effort` help-text
+  parser, the shared listing parser, and model/effort resolution (flag, env, config) for a
+  dispatch.
 - `src/core/errors.mjs` — `RelayError`, a minimal typed error (`code`, `exitCode`, `cause`)
   used at the hot-path throw sites, handled once in `main().catch()`. Preserves the exact
   original exit codes and message text for every pre-existing error path — including the
   asymmetry where a usage error (exit 2) prints with no `cli-relay error:` prefix while
   everything else (exit 1) does; that split existed before `RelayError` did and is
   intentional, not something to "fix" into consistency.
-- `src/commands/` — `list`/`reset`/`pin`/`unpin`/`pins`/`doctor`/`audit`, one file each.
+- `src/commands/` — `list`/`reset`/`pin`/`unpin`/`pins`/`doctor`/`audit`/`models`/`help`/
+  `pick`/`loop`, one file each.
 - `src/governance/ledger.mjs` — best-effort append-only dispatch ledger plus explicit,
   read-time integrity verification. There is no automatic retention cap; verification already
   recognizes explicit checkpoint records as valid new anchors so a future retention policy
@@ -281,8 +396,16 @@ also executes the real POSIX timeout, interrupt, and descendant-cleanup cases.
 Windows process-tree termination still requires a separate live Windows check;
 the mocked branch tests do not substitute for that platform validation.
 
+`tests/effort.mjs` covers `--effort`, the agy rule, the discovery timeout, `cli-relay models`,
+`cli-relay help`, the `backends` config defaults and model/effort recording, hermetically
+(fake backend binaries, temporary HOME). It compares every adapter's flag-free argv against
+`tests/fixtures/argv-snapshot.json`, generated from `main` before effort support existed by
+`tests/fixtures/gen-argv-snapshot.mjs`. The smoke suite runs it as one section. Live backends
+are not exercised: the help-text and model-cache shapes are taken from observed output.
+
 ```
 bash tests/smoke.sh
+node tests/effort.mjs
 ```
 
 ## Review history
@@ -680,8 +803,9 @@ repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
   `CLI_RELAY_COMMAND_CODE_MODEL` (falls back to the prior hardcoded `zai-org/glm-5.2` when
   unset) — command-code routes 68 models and different threads legitimately want different
   ones. As of the `--model` dispatch flag, a per-call `--model <name>` takes precedence over
-  that env override, which in turn takes precedence over the default; `--effort` is still
-  not wired through.
+  that env override, which in turn takes precedence over a `backends` config default and
+  then the built-in default; `--effort <level>` is passed through to command-code unchecked,
+  since its accepted levels depend on the routed model.
 - `claude-code` calls hit real Anthropic billing against the Pro plan (confirmed ~$0.07-0.13
   per short test call) — not free the way codex/agy effectively are for testing.
 - Grandchild processes that double-fork/setsid out of a backend's process group would survive
