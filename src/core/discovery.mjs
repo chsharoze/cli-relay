@@ -13,6 +13,27 @@ export function discoveryTimeoutMs() {
   return Number.isFinite(override) && override > 0 ? override : DISCOVERY_TIMEOUT_MS;
 }
 
+// Bounded discovery children run in their own process group, so a terminal Ctrl-C does
+// not reach them. The router's signal handler terminates them through this registry.
+const activeDiscoveryPids = new Set();
+
+// Kills every running discovery child with its process group. Returns null when the kills
+// were synchronous (POSIX, or nothing to kill) and a promise on Windows, where taskkill is
+// asynchronous and callers must await it before exiting.
+export function terminateDiscoveryChildren() {
+  const pending = [];
+  for (const pid of activeDiscoveryPids) {
+    const result = killProcessTree(pid, 'SIGKILL');
+    if (result) pending.push(result);
+  }
+  activeDiscoveryPids.clear();
+  return pending.length > 0 ? Promise.all(pending) : null;
+}
+
+export function activeDiscoveryCount() {
+  return activeDiscoveryPids.size;
+}
+
 // Spawns a backend's listing or help command with the scrubbed base env. With a timeout,
 // a child still running at the deadline is killed with its process group and the result
 // is `{ error }` with `timedOut: true`; its pipes are released so a lingering grandchild
@@ -28,10 +49,13 @@ export function runListing(binary, args, { timeoutMs } = {}) {
     let err = '';
     let settled = false;
     let timer = null;
+    const tracked = timeoutMs != null && child.pid;
+    if (tracked) activeDiscoveryPids.add(child.pid);
     const settle = (result) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (tracked) activeDiscoveryPids.delete(child.pid);
       resolve(result);
     };
     child.stdout.on('data', (chunk) => { out += chunk; });

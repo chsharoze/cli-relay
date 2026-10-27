@@ -136,6 +136,9 @@ try {
       process: { platform, exit: (code) => exits.push(code) },
       killProcessTree,
       isProcessGroupAlive,
+      // No discovery runs in these lifecycle fixtures; the signal path still consults it.
+      activeDiscoveryCount: () => 0,
+      terminateDiscoveryChildren: () => null,
       SPAWN_TIMEOUT_MS: 100,
       SPAWN_KILL_GRACE_MS: 10,
       spawn: (...args) => { spawns.push(args); return child; },

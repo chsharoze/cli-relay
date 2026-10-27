@@ -56,6 +56,7 @@ import {
   printBackendConfigWarnings,
   resolveDispatchSettings,
 } from './src/core/dispatch-settings.mjs';
+import { activeDiscoveryCount, terminateDiscoveryChildren } from './src/core/discovery.mjs';
 import { isEffortLevel } from './src/core/effort.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
@@ -872,7 +873,8 @@ function onSignal(signal) {
       }
       killProcessTree(activeChildPgid, 'SIGKILL');
     }
-    process.exit(interruptExitCode());
+    exitAfterDiscoveryCleanup();
+    return;
   }
   userInterrupted = true;
   interruptSignal = signal;
@@ -888,10 +890,24 @@ function onSignal(signal) {
       `\ncli-relay: ${signal} received — finishing in-flight bookkeeping before exit ` +
       '(Ctrl-C again to force)...',
     );
+  } else if (activeDiscoveryCount() > 0) {
+    console.error(`\ncli-relay: ${signal} received — terminating backend discovery and exiting.`);
+    exitAfterDiscoveryCleanup();
   } else {
     console.error(`\ncli-relay: ${signal} received, nothing spawned yet — exiting.`);
     process.exit(interruptExitCode());
   }
+}
+
+// Discovery children (model listings, help reads) run detached, so a terminal signal does
+// not reach them; kill them before exiting, awaiting taskkill on Windows.
+function exitAfterDiscoveryCleanup() {
+  const pending = terminateDiscoveryChildren();
+  if (pending) {
+    pending.then(() => process.exit(interruptExitCode()));
+    return;
+  }
+  process.exit(interruptExitCode());
 }
 
 process.on('SIGINT', () => onSignal('SIGINT'));

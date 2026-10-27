@@ -3,7 +3,7 @@
 // backend binary is a fake shell script in a temporary directory, PATH holds only that
 // directory plus /usr/bin:/bin, and each run gets its own temporary HOME.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
@@ -87,7 +87,7 @@ function makeFakes() {
 if [ "$1" = models ]; then
   case "$(cat "$(dirname "$0")/agy-models-mode" 2>/dev/null)" in
     fail) echo "listing broke" >&2; exit 1 ;;
-    hang) exec sleep 30 ;;
+    hang) echo $$ > "$(dirname "$0")/agy-models.pid"; exec sleep 30 ;;
   esac
   cat "$(dirname "$0")/agy-models.txt"; exit 0
 fi
@@ -528,6 +528,39 @@ try {
     assert.equal(result.code, 0, result.err);
     assert.equal(JSON.parse(result.out)['claude-code'].efforts, null);
     assert.equal(warnings(result.err).length, 1);
+  });
+
+  await test('Ctrl-C during discovery kills the detached discovery child and exits 130', async () => {
+    const bin = makeFakes();
+    writeFileSync(join(bin, 'calls.log'), '');
+    writeFileSync(join(bin, 'agy-models-mode'), 'hang');
+    const pidFile = join(bin, 'agy-models.pid');
+    const child = spawn(process.execPath, [ROUTE, 'models', 'agy'], {
+      cwd: '/', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: makeHome() }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(pidFile) || !readFileSync(pidFile, 'utf8').trim()) {
+      assert.ok(Date.now() < deadline, 'discovery child never started');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const discoveryPid = Number(readFileSync(pidFile, 'utf8').trim());
+    child.kill('SIGINT');
+    const { code } = await exited;
+    assert.equal(code, 130, stderr);
+    assert.match(stderr, /terminating backend discovery/);
+    let alive = true;
+    for (let attempt = 0; attempt < 40 && alive; attempt += 1) {
+      try {
+        process.kill(discoveryPid, 0);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    assert.equal(alive, false, `discovery child ${discoveryPid} survived Ctrl-C`);
   });
 
   // --- config defaults ---
