@@ -8,15 +8,17 @@ export default {
   order: 20,
   binaryCandidates: ['agy'],
   installHint: 'macOS: brew install --cask antigravity-cli — other platforms: https://antigravity.google/product/antigravity-cli',
-  fresh: (prompt, model, mode) => [
+  fresh: (prompt, model, mode, effort) => [
     'agy', '--dangerously-skip-permissions', '--print-timeout', '10m',
     '--model', model ?? DEFAULT_MODEL, ...(mode ? ['--mode', mode] : []),
+    ...(effort ? ['--effort', effort] : []),
     '--add-dir', process.cwd(),
     '--output-format', 'json', '-p', prompt,
   ],
-  resume: (id, prompt, model, mode) => [
+  resume: (id, prompt, model, mode, effort) => [
     'agy', '--dangerously-skip-permissions', '--print-timeout', '10m',
     '--model', model ?? DEFAULT_MODEL, ...(mode ? ['--mode', mode] : []),
+    ...(effort ? ['--effort', effort] : []),
     '--add-dir', process.cwd(),
     '--output-format', 'json', '--conversation', id, '-p', prompt,
   ],

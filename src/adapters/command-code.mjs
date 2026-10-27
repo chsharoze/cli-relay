@@ -17,9 +17,9 @@ export default {
   order: 40,
   binaryCandidates: ['command-code'],
   installHint: 'npm install -g command-code, then: command-code login',
-  fresh: (prompt, model) => [
+  fresh: (prompt, model, _mode, effort) => [
     'command-code', '-p', prompt,
-    '-m', resolveModel(model),
+    '-m', resolveModel(model), ...(effort ? ['--effort', effort] : []),
     '--output-format', 'json', '--yolo', '--no-auto-update',
   ],
   // Resume remains deliberately unsupported because the seed turn can disappear silently.

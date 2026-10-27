@@ -3,6 +3,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ENV_BASE } from '../core/adapter-env.mjs';
 
+const DEFAULT_MODEL = 'gpt-6.1-sol';
+
+// Both `codex exec` and `codex exec resume` accept `-c key=value` config overrides.
+const effortArgs = (effort) => (effort ? ['-c', `model_reasoning_effort=${effort}`] : []);
+
 function findRolloutFile(threadId) {
   const root = join(homedir(), '.codex', 'sessions');
   if (!existsSync(root)) return null;
@@ -21,15 +26,15 @@ export default {
   order: 10,
   binaryCandidates: ['codex'],
   installHint: 'npm install -g @openai/codex, then: codex login',
-  fresh: (prompt, model) => [
+  fresh: (prompt, model, _mode, effort) => [
     'codex', 'exec', '--skip-git-repo-check', '--sandbox', 'workspace-write',
-    '-m', model ?? 'gpt-6.1-sol', '--json', prompt,
+    '-m', model ?? DEFAULT_MODEL, ...effortArgs(effort), '--json', prompt,
   ],
   // `codex exec resume` has no --sandbox flag. This is the only confirmed non-interactive
   // path that restores the write access granted to the fresh invocation.
-  resume: (id, prompt, model) => [
+  resume: (id, prompt, model, _mode, effort) => [
     'codex', 'exec', 'resume', id, '--dangerously-bypass-approvals-and-sandbox',
-    '-m', model ?? 'gpt-6.1-sol', '--json', prompt,
+    '-m', model ?? DEFAULT_MODEL, ...effortArgs(effort), '--json', prompt,
   ],
   env: ENV_BASE,
   parse(stdout) {

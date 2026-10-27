@@ -3,8 +3,8 @@
  * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--mode <name>] [--confirm]
- *     <backend> <thread> <fresh|resume> <prompt...>
+ *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--effort <level>]
+ *     [--mode <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
  *   cli-relay models [backend]
@@ -49,6 +49,7 @@ import {
   SPAWN_KILL_GRACE_MS,
   SPAWN_TIMEOUT_MS,
 } from './src/config.mjs';
+import { isEffortLevel } from './src/core/effort.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
 import { withLock } from './src/core/lock.mjs';
@@ -232,7 +233,8 @@ async function runHousekeeping(cliArgs) {
 
 function printUsage(backends) {
   console.error(
-    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--mode <name>] [--confirm] ' +
+    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] ' +
+    '[--effort <level>] [--mode <name>] [--confirm] ' +
     '<backend> <thread> <fresh|resume> <prompt...>',
   );
   console.error('       cli-relay list');
@@ -253,10 +255,10 @@ function printUsage(backends) {
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
 
-// Governance/routing flags (--dry-run, --print-command, --tier, --model, --confirm) are only
-// recognized before the third positional routing argument (mode: fresh/resume) is
-// collected. Once mode is filled in, every remaining word is prompt text by definition
-// and must never be reinterpreted as a flag -- a prompt that happens to contain the
+// Governance/routing flags (--dry-run, --print-command, --tier, --model, --mode, --effort,
+// --confirm) are only recognized before the third positional routing argument (mode:
+// fresh/resume) is collected. Once mode is filled in, every remaining word is prompt text
+// by definition and must never be reinterpreted as a flag -- a prompt that happens to contain the
 // literal word "--confirm" (or "--tier", "--dry-run") as one of its tokens must not be
 // able to grant a tier-3/4 dispatch or otherwise alter routing. This was a real,
 // live-reproduced bypass: `cli-relay agy t fresh --tier=irreversible please --confirm x`
@@ -272,6 +274,8 @@ function parseDispatchFlags(cliArgs) {
   let modelSeen = false;
   let modeValue;
   let modeSeen = false;
+  let effortValue;
+  let effortSeen = false;
   const routingArgs = [];
 
   for (let index = 0; index < cliArgs.length; index += 1) {
@@ -362,9 +366,40 @@ function parseDispatchFlags(cliArgs) {
       }
       continue;
     }
+    if (argument === '--effort' || argument.startsWith('--effort=')) {
+      if (effortSeen) {
+        throw new RelayError(
+          'INVALID_EFFORT',
+          '--effort may be provided only once',
+          { exitCode: 2 },
+        );
+      }
+      effortSeen = true;
+      if (argument === '--effort') {
+        effortValue = cliArgs[index + 1];
+        index += 1;
+      } else {
+        effortValue = argument.slice('--effort='.length);
+      }
+      if (effortValue == null || effortValue === '' || effortValue.startsWith('--')) {
+        throw new RelayError(
+          'INVALID_EFFORT',
+          '--effort requires a level',
+          { exitCode: 2 },
+        );
+      }
+      if (!isEffortLevel(effortValue)) {
+        throw new RelayError(
+          'INVALID_EFFORT',
+          `invalid effort "${effortValue}" — a level is lowercase letters only (e.g. low, high)`,
+          { exitCode: 2 },
+        );
+      }
+      continue;
+    }
     routingArgs.push(argument);
   }
-  return { dryRun, confirm, tierValue, modelValue, modeValue, routingArgs };
+  return { dryRun, confirm, tierValue, modelValue, modeValue, effortValue, routingArgs };
 }
 
 function sessionForInvocation(map, backend, thread, mode, adapter) {
@@ -477,7 +512,7 @@ async function main() {
   }
 
   const {
-    dryRun, confirm, tierValue, modelValue, modeValue, routingArgs,
+    dryRun, confirm, tierValue, modelValue, modeValue, effortValue, routingArgs,
   } = parseDispatchFlags(cliArgs);
   const [backend, thread, mode, ...rest] = routingArgs;
   const prompt = rest.join(' ');
@@ -541,8 +576,8 @@ async function main() {
     assertNotInFlight(session, thread);
     const augmentedPrompt = buildPinnedBlock(session.pinned_facts) + prompt;
     const argv = mode === 'resume'
-      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue, modeValue)
-      : adapter.fresh(augmentedPrompt, modelValue, modeValue);
+      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue, modeValue, effortValue)
+      : adapter.fresh(augmentedPrompt, modelValue, modeValue, effortValue);
     console.log(JSON.stringify(argv));
     return;
   }
@@ -600,8 +635,8 @@ async function main() {
 
   const augmentedPrompt = buildPinnedBlock(record.pinned_facts) + prompt;
   const argv = mode === 'resume'
-    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue, modeValue)
-    : adapter.fresh(augmentedPrompt, modelValue, modeValue);
+    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue, modeValue, effortValue)
+    : adapter.fresh(augmentedPrompt, modelValue, modeValue, effortValue);
   const env = scrubEnv(adapter.env);
   const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
   if (outputOverflow) {
