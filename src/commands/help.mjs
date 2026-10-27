@@ -48,9 +48,14 @@ export function effectiveDefaults(name, adapter) {
   if (settings.modelSource === 'env') model = `${settings.model} (env ${adapter.modelEnvVar})`;
   else if (settings.modelSource === 'config') model = `${settings.model} (config)`;
   else model = adapter.defaultModel ? `${adapter.defaultModel} (built-in)` : 'backend default';
-  const effort = settings.effortSource === 'config'
-    ? `${settings.effort} (config)`
-    : 'backend default';
+  // A model id that embeds its effort (agy's `-medium` suffix) sets the effort itself.
+  const modelId = settings.model ?? adapter.defaultModel;
+  const embedded = modelId && typeof adapter.modelEffort === 'function'
+    ? adapter.modelEffort(modelId)
+    : null;
+  let effort = 'backend default';
+  if (settings.effortSource === 'config') effort = `${settings.effort} (config)`;
+  else if (embedded) effort = `${embedded} (model id)`;
   return { model, effort };
 }
 

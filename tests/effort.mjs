@@ -711,7 +711,7 @@ try {
         assert.ok(result.out.includes(`  ${flagName}`), flagName);
       }
       assert.match(result.out, /codex +gpt-6\.1-mini \(config\) +low \(config\)/);
-      assert.match(result.out, /agy +gemini-3\.8-flash-medium \(built-in\) +backend default/);
+      assert.match(result.out, /agy +gemini-3\.8-flash-medium \(built-in\) +medium \(model id\)/);
       assert.match(result.out, /claude-code +backend default +backend default/);
       assert.match(result.out, /command-code +env\/model \(env CLI_RELAY_COMMAND_CODE_MODEL\) +backend default/);
       assert.ok(result.out.includes('Choosing an effort (--effort <level>). A starting point, not a rule.'));
