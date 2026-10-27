@@ -572,14 +572,24 @@ try {
     const { code } = await exited;
     assert.equal(code, 130, stderr);
     assert.match(stderr, /terminating backend discovery/);
+    // A killed child whose parent exited before reaping it stays a zombie until init reaps
+    // it, and signal 0 still succeeds on a zombie; where /proc exists, count that as dead.
+    const isAlive = (pid) => {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return false;
+      }
+      try {
+        return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+      } catch {
+        return true;
+      }
+    };
     let alive = true;
     for (let attempt = 0; attempt < 40 && alive; attempt += 1) {
-      try {
-        process.kill(discoveryPid, 0);
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      } catch {
-        alive = false;
-      }
+      alive = isAlive(discoveryPid);
+      if (alive) await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.equal(alive, false, `discovery child ${discoveryPid} survived Ctrl-C`);
   });
