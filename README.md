@@ -714,9 +714,7 @@ guessing at intent, the same trap this whole project has avoided everywhere else
 ## cli-relay loop — plan-bound review approval
 
 Added 2026-09-22, ported (deliberately, not wholesale) from an independent read-only source
-review of [claudex-loop](https://github.com/chaseai-yt/claudex-loop) — see
-`~/Desktop/repo-evaluations-2026-09-21/claudex-loop-analysis-DS-Flash.md` for the source
-analysis this is built from. Named `loop` because that's what it governs: a
+review of [claudex-loop](https://github.com/chaseai-yt/claudex-loop). Named `loop` because that's what it governs: a
 plan → review → build loop where a review verdict must still hold by the time anything acts
 on it. It lives inside cli-relay, not as a separate tool, because the thing being bound
 (a verdict) is produced by exactly the kind of dispatch cli-relay already routes and
@@ -752,7 +750,7 @@ the verdict (`codex`, `claude-code`, `agy`, `command-code`) and `--model` option
 which model within it, purely as an audit field on the recorded approval — it does not itself
 dispatch anything. You (or the agent orchestrating the loop) run the actual review however you
 already do — `cli-relay <reviewer> <thread> fresh "<review prompt>"`, or a real codex/claude
-CLI call with read-only flags per `codex-pipeline` — read its structured verdict back, then
+CLI call with read-only flags — read its structured verdict back, then
 call `loop record` with the exact backend/model that produced it. This keeps model choice a
 per-call decision (yours, or the agent's, made explicit in the command) rather than a fixed
 config value that goes stale the way the `agy` model catalog already has once (see Known gaps).
@@ -787,8 +785,7 @@ dispatch already is.
 
 **What this is not.** It makes no confinement claim — recording a verdict from a given
 `--reviewer`/`--model` is not a guarantee that backend was actually sandboxed while producing
-it; that's on you when you choose the reviewer call (read-only flags, no write tools — see
-`codex-pipeline`). It also enforces no round caps, no client/confidentiality gate, and no
+it; that's on you when you choose the reviewer call (read-only flags, no write tools). It also enforces no round caps, no client/confidentiality gate, and no
 "the builder wrote into a worktree, not the source tree" rule — those stay manual discipline,
 same as everywhere else in this project's workflow (draft the command, don't run it against
 source-of-truth files).

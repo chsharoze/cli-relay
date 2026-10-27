@@ -2,7 +2,7 @@
  * cli-relay loop — plan-bound review approval.
  *
  * Ported (deliberately, not wholesale) from claudex-loop (github.com/chaseai-yt/claudex-loop),
- * independently reviewed 2026-09-21 (see ~/Desktop/repo-evaluations-2026-09-21/). What's borrowed:
+ * independently reviewed 2026-09-21. What's borrowed:
  * approval cryptographically bound to the plan's exact bytes and the exact repo/plan paths
  * (`checkApproval` mirrors its `check_approval`), a before/after tree fingerprint that catches
  * a repo mutated mid-review or after approval (mirrors its `snapshot`), and a verdict schema
