@@ -1414,7 +1414,7 @@ echo "agy-model-beta"
 MODEL_AGY
 cat > "$MODEL_DIR/command-code" << 'MODEL_COMMAND_CODE'
 #!/bin/sh
-echo "command-code-model-x"
+echo "provider/command-code-model-x"
 MODEL_COMMAND_CODE
 chmod +x "$MODEL_DIR/agy" "$MODEL_DIR/command-code"
 models_all=$(PATH="$MODEL_DIR:$PATH" node "$ROUTE" models); models_all_code=$?
@@ -1422,7 +1422,7 @@ check "cli-relay models exits 0" 0 "$models_all_code"
 echo "$models_all" | grep -q "^codex: pass-through" && echo "PASS: codex reported as pass-through" && PASS=$((PASS+1)) || { echo "FAIL: codex not pass-through: $models_all"; FAIL=$((FAIL+1)); }
 echo "$models_all" | grep -q "^claude-code: pass-through" && echo "PASS: claude-code reported as pass-through" && PASS=$((PASS+1)) || { echo "FAIL: claude-code not pass-through: $models_all"; FAIL=$((FAIL+1)); }
 echo "$models_all" | grep -q "agy-model-alpha" && echo "PASS: agy listing echoed raw" && PASS=$((PASS+1)) || { echo "FAIL: agy listing missing: $models_all"; FAIL=$((FAIL+1)); }
-echo "$models_all" | grep -q "command-code-model-x" && echo "PASS: command-code listing echoed raw" && PASS=$((PASS+1)) || { echo "FAIL: command-code listing missing: $models_all"; FAIL=$((FAIL+1)); }
+echo "$models_all" | grep -q "command-code-model-x" && echo "PASS: command-code listing reported" && PASS=$((PASS+1)) || { echo "FAIL: command-code listing missing: $models_all"; FAIL=$((FAIL+1)); }
 models_agy=$(PATH="$MODEL_DIR:$PATH" node "$ROUTE" models agy); models_agy_code=$?
 check "cli-relay models agy exits 0" 0 "$models_agy_code"
 echo "$models_agy" | grep -q "agy-model-alpha" && echo "PASS: single-backend listing echoed raw" && PASS=$((PASS+1)) || { echo "FAIL: agy-only listing missing: $models_agy"; FAIL=$((FAIL+1)); }
@@ -1529,6 +1529,11 @@ node "$(dirname "$ROUTE")/tests/ledger-lock-regressions.mjs"
 check "shared ledger aliases and suspended writers serialize without stale links" 0 "$?"
 node "$(dirname "$ROUTE")/tests/ledger-data-regressions.mjs"
 check "proto-named fields and bounded delimiter-corruption recovery" 0 "$?"
+
+echo
+echo "== --effort, model/effort menu, help, backend config defaults, recording (hermetic) =="
+node "$(dirname "$ROUTE")/tests/effort.mjs" > /dev/null
+check "effort flag, discovery, menu, help, config defaults and recording" 0 "$?"
 
 rm -rf "$FAKE_DIR" "$WORK"
 

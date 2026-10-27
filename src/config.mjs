@@ -39,9 +39,13 @@ function expandHome(value) {
   return value;
 }
 
-function loadConfig() {
-  if (!existsSync(CONFIG_PATH)) return { ...DEFAULTS };
-  const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+function readRawConfig() {
+  if (!existsSync(CONFIG_PATH)) return null;
+  return JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+}
+
+function loadConfig(raw) {
+  if (raw === null) return { ...DEFAULTS };
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error(`${CONFIG_PATH} must contain a JSON object`);
   }
@@ -69,7 +73,8 @@ function loadConfig() {
   return merged;
 }
 
-export const CONFIG = Object.freeze(loadConfig());
+const RAW_CONFIG = readRawConfig();
+export const CONFIG = Object.freeze(loadConfig(RAW_CONFIG));
 
 export const {
   MAP_PATH,
@@ -97,3 +102,47 @@ export const LEDGER_PATH = LEDGER_PATH_CONFIG_ERROR
 // configurable, so a map or timeout override cannot leave its related safety value behind.
 export const LOCK_PATH = `${MAP_PATH}.lock`;
 export const LOCK_STALE_MS = SPAWN_TIMEOUT_MS + LOCK_STALE_GRACE_MS;
+
+// Optional per-backend defaults: { "backends": { "<name>": { "model"?, "effort"? } } }.
+// Read outside the throwing validation above, like LEDGER_PATH: a malformed entry or value
+// is reported as a warning and ignored, so it can never take down any command. Backend
+// names are checked against the loaded adapters where they are used (core/
+// dispatch-settings.mjs), since user adapters can add names.
+const EFFORT_VALUE = /^[a-z]+$/;
+
+function loadBackendDefaults(raw) {
+  const defaults = Object.create(null);
+  const warnings = [];
+  const backends = raw?.backends;
+  if (backends === undefined) return { defaults, warnings };
+  if (!backends || typeof backends !== 'object' || Array.isArray(backends)) {
+    warnings.push(`${CONFIG_PATH}: backends must be an object; ignoring it`);
+    return { defaults, warnings };
+  }
+  for (const [name, entry] of Object.entries(backends)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      warnings.push(`${CONFIG_PATH}: backends.${name} must be an object; ignoring it`);
+      continue;
+    }
+    const accepted = {};
+    for (const [key, value] of Object.entries(entry)) {
+      if (key === 'model') {
+        if (typeof value === 'string' && value.trim() !== '') accepted.model = value;
+        else warnings.push(`${CONFIG_PATH}: backends.${name}.model must be a non-empty string; ignoring it`);
+      } else if (key === 'effort') {
+        if (typeof value === 'string' && EFFORT_VALUE.test(value)) accepted.effort = value;
+        else warnings.push(`${CONFIG_PATH}: backends.${name}.effort must match ^[a-z]+$; ignoring it`);
+      } else {
+        warnings.push(`${CONFIG_PATH}: backends.${name}.${key} is not a known setting; ignoring it`);
+      }
+    }
+    defaults[name] = Object.freeze(accepted);
+  }
+  return { defaults, warnings };
+}
+
+const backendDefaults = loadBackendDefaults(
+  RAW_CONFIG && typeof RAW_CONFIG === 'object' && !Array.isArray(RAW_CONFIG) ? RAW_CONFIG : null,
+);
+export const BACKEND_DEFAULTS = Object.freeze(backendDefaults.defaults);
+export const BACKEND_DEFAULTS_WARNINGS = Object.freeze(backendDefaults.warnings);

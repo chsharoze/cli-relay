@@ -3,11 +3,11 @@
  * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--mode <name>] [--confirm]
- *     <backend> <thread> <fresh|resume> <prompt...>
+ *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--effort <level>]
+ *     [--mode <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
- *   cli-relay models [backend]
+ *   cli-relay models [backend] [--json]
  *   cli-relay pick '<task>'
  *   cli-relay audit verify
  *   cli-relay reset <thread>
@@ -17,6 +17,7 @@
  *   cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend>
  *     --verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]
  *   cli-relay loop check <thread> [--plan <path>] [--repo <path>]
+ *   cli-relay help | --help | -h
  *
  * Dispatch flags must precede the mode argument. They may be interspersed among
  * backend/thread/mode; every token after mode is literal prompt text.
@@ -33,6 +34,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { cmdAuditVerify } from './src/commands/audit.mjs';
 import { cmdDoctor } from './src/commands/doctor.mjs';
+import { cmdHelp, USAGE_LINES } from './src/commands/help.mjs';
 import { cmdList } from './src/commands/list.mjs';
 import { cmdLoopCheck, cmdLoopRecord } from './src/commands/loop.mjs';
 import { cmdModels } from './src/commands/models.mjs';
@@ -49,6 +51,13 @@ import {
   SPAWN_KILL_GRACE_MS,
   SPAWN_TIMEOUT_MS,
 } from './src/config.mjs';
+import {
+  prepareDispatch,
+  printBackendConfigWarnings,
+  resolveDispatchSettings,
+} from './src/core/dispatch-settings.mjs';
+import { activeDiscoveryCount, terminateDiscoveryChildren } from './src/core/discovery.mjs';
+import { isEffortLevel } from './src/core/effort.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
 import { withLock } from './src/core/lock.mjs';
@@ -231,32 +240,15 @@ async function runHousekeeping(cliArgs) {
 }
 
 function printUsage(backends) {
-  console.error(
-    'usage: cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--mode <name>] [--confirm] ' +
-    '<backend> <thread> <fresh|resume> <prompt...>',
-  );
-  console.error('       cli-relay list');
-  console.error('       cli-relay doctor');
-  console.error('       cli-relay models [backend]');
-  console.error("       cli-relay pick '<task>'");
-  console.error('       cli-relay audit verify');
-  console.error('       cli-relay reset <thread>');
-  console.error('       cli-relay pin <thread> "<fact>"');
-  console.error('       cli-relay unpin <thread> <index>');
-  console.error('       cli-relay pins <thread>');
-  console.error(
-    '       cli-relay loop record <thread> --plan <path> --repo <path> --reviewer <backend> ' +
-    '--verdict <APPROVED|REVISE|BLOCKED> --summary "<text>" [--model <model>] [...]',
-  );
-  console.error('       cli-relay loop check <thread> [--plan <path>] [--repo <path>]');
+  USAGE_LINES.forEach((line, index) => console.error(`${index === 0 ? 'usage:' : '      '} ${line}`));
   console.error('dispatch flags must precede <fresh|resume>; all following tokens are prompt text');
   console.error(`backends: ${Object.keys(backends).join(', ')}`);
 }
 
-// Governance/routing flags (--dry-run, --print-command, --tier, --model, --confirm) are only
-// recognized before the third positional routing argument (mode: fresh/resume) is
-// collected. Once mode is filled in, every remaining word is prompt text by definition
-// and must never be reinterpreted as a flag -- a prompt that happens to contain the
+// Governance/routing flags (--dry-run, --print-command, --tier, --model, --mode, --effort,
+// --confirm) are only recognized before the third positional routing argument (mode:
+// fresh/resume) is collected. Once mode is filled in, every remaining word is prompt text
+// by definition and must never be reinterpreted as a flag -- a prompt that happens to contain the
 // literal word "--confirm" (or "--tier", "--dry-run") as one of its tokens must not be
 // able to grant a tier-3/4 dispatch or otherwise alter routing. This was a real,
 // live-reproduced bypass: `cli-relay agy t fresh --tier=irreversible please --confirm x`
@@ -272,6 +264,8 @@ function parseDispatchFlags(cliArgs) {
   let modelSeen = false;
   let modeValue;
   let modeSeen = false;
+  let effortValue;
+  let effortSeen = false;
   const routingArgs = [];
 
   for (let index = 0; index < cliArgs.length; index += 1) {
@@ -362,9 +356,40 @@ function parseDispatchFlags(cliArgs) {
       }
       continue;
     }
+    if (argument === '--effort' || argument.startsWith('--effort=')) {
+      if (effortSeen) {
+        throw new RelayError(
+          'INVALID_EFFORT',
+          '--effort may be provided only once',
+          { exitCode: 2 },
+        );
+      }
+      effortSeen = true;
+      if (argument === '--effort') {
+        effortValue = cliArgs[index + 1];
+        index += 1;
+      } else {
+        effortValue = argument.slice('--effort='.length);
+      }
+      if (effortValue == null || effortValue === '' || effortValue.startsWith('--')) {
+        throw new RelayError(
+          'INVALID_EFFORT',
+          '--effort requires a level',
+          { exitCode: 2 },
+        );
+      }
+      if (!isEffortLevel(effortValue)) {
+        throw new RelayError(
+          'INVALID_EFFORT',
+          `invalid effort "${effortValue}" — a level is lowercase letters only (e.g. low, high)`,
+          { exitCode: 2 },
+        );
+      }
+      continue;
+    }
     routingArgs.push(argument);
   }
-  return { dryRun, confirm, tierValue, modelValue, modeValue, routingArgs };
+  return { dryRun, confirm, tierValue, modelValue, modeValue, effortValue, routingArgs };
 }
 
 function sessionForInvocation(map, backend, thread, mode, adapter) {
@@ -418,7 +443,7 @@ function sessionForInvocation(map, backend, thread, mode, adapter) {
 // same cases a real run would refuse (found in review: dry-run intentionally skips the
 // lock, but that means it also silently skipped this check, printing a preview for a
 // command that would actually be refused).
-function assertNotInFlight(session, thread) {
+function assertNotInFlight(session, thread, { warnStale = true } = {}) {
   if (session.status !== 'running') return;
   const ageMs = Date.now() - Date.parse(session.run_started_iso || 0);
   if (Number.isFinite(ageMs) && ageMs < LOCK_STALE_MS) {
@@ -428,6 +453,7 @@ function assertNotInFlight(session, thread) {
       `${session.run_started_iso}) — refusing a concurrent turn on the same native session`,
     );
   }
+  if (!warnStale) return;
   console.error(
     `warning: thread "${thread}" was left mid-run (started ${session.run_started_iso}, ` +
     `stale) — the previous invocation likely crashed. Proceeding from its last confirmed id.`,
@@ -463,21 +489,22 @@ async function main() {
     return;
   }
   if (cliArgs[0] === 'models') {
-    await cmdModels(adapters, cliArgs[1]);
+    await cmdModels(adapters, cliArgs.slice(1));
     return;
   }
   if (cliArgs[0] === 'pick') {
     await cmdPick(adapters, cliArgs.slice(1).join(' '));
     return;
   }
-  if (cliArgs[0] === 'help') {
-    printUsage(adapters);
-    process.exitCode = 0;
+  // `help` ignores any further arguments, as it always has; `--help`/`-h` count only alone,
+  // since a lone flag otherwise reaches dispatch parsing.
+  if (cliArgs[0] === 'help' || (cliArgs.length === 1 && ['--help', '-h'].includes(cliArgs[0]))) {
+    cmdHelp(adapters);
     return;
   }
 
   const {
-    dryRun, confirm, tierValue, modelValue, modeValue, routingArgs,
+    dryRun, confirm, tierValue, modelValue, modeValue, effortValue, routingArgs,
   } = parseDispatchFlags(cliArgs);
   const [backend, thread, mode, ...rest] = routingArgs;
   const prompt = rest.join(' ');
@@ -535,14 +562,23 @@ async function main() {
     throw new RelayError('TIER_CONFIRMATION_REQUIRED', gate.reason);
   }
 
+  printBackendConfigWarnings(adapters);
+  const settings = resolveDispatchSettings(backend, adapter, {
+    modelFlag: modelValue,
+    effortFlag: effortValue,
+  });
+
   if (dryRun) {
     const map = loadMap();
     const session = sessionForInvocation(map, backend, thread, mode, adapter);
     assertNotInFlight(session, thread);
+    // The same discovery a real dispatch runs, so the printed argv is the real one; it
+    // runs only after the refusals above, so a refused preview spawns nothing.
+    const { model, effort } = await prepareDispatch(backend, adapter, settings);
     const augmentedPrompt = buildPinnedBlock(session.pinned_facts) + prompt;
     const argv = mode === 'resume'
-      ? adapter.resume(session.native_session_id, augmentedPrompt, modelValue, modeValue)
-      : adapter.fresh(augmentedPrompt, modelValue, modeValue);
+      ? adapter.resume(session.native_session_id, augmentedPrompt, model, modeValue, effort)
+      : adapter.fresh(augmentedPrompt, model, modeValue, effort);
     console.log(JSON.stringify(argv));
     return;
   }
@@ -556,9 +592,25 @@ async function main() {
     tier: tier.level,
     tier_name: tier.name,
     gate_allowed: true,
+    model: null,
+    effort: null,
   };
 
   try {
+
+  // Read-only pre-check of the same refusals critical section 1 enforces, so a call that
+  // will be refused (unconfirmed resume, run in flight, wrong backend, cwd mismatch) never
+  // spawns discovery. Critical section 1 re-checks under the lock and stays authoritative.
+  assertNotInFlight(
+    sessionForInvocation(loadMap(), backend, thread, mode, adapter), thread, { warnStale: false },
+  );
+  const { model, effort, effortUsed } = await prepareDispatch(backend, adapter, settings);
+  // What the call actually runs with, for the ledger and the session map: the resolved
+  // model or, when none was resolved, the adapter's declared built-in default.
+  const recordedModel = model ?? adapter.defaultModel ?? null;
+  const recordedEffort = effortUsed ?? null;
+  ledgerEntry.model = recordedModel;
+  ledgerEntry.effort = recordedEffort;
 
   // Critical section 1: validate and mark running before spawn.
   const record = await withLock(() => {
@@ -593,6 +645,8 @@ async function main() {
 
     session.status = 'running';
     session.run_started_iso = new Date().toISOString();
+    session.last_model = recordedModel;
+    session.last_effort = recordedEffort;
     map.sessions[thread] = session;
     saveMap(map);
     return { ...session };
@@ -600,8 +654,8 @@ async function main() {
 
   const augmentedPrompt = buildPinnedBlock(record.pinned_facts) + prompt;
   const argv = mode === 'resume'
-    ? adapter.resume(record.native_session_id, augmentedPrompt, modelValue, modeValue)
-    : adapter.fresh(augmentedPrompt, modelValue, modeValue);
+    ? adapter.resume(record.native_session_id, augmentedPrompt, model, modeValue, effort)
+    : adapter.fresh(augmentedPrompt, model, modeValue, effort);
   const env = scrubEnv(adapter.env);
   const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
   if (outputOverflow) {
@@ -832,7 +886,8 @@ function onSignal(signal) {
       }
       killProcessTree(activeChildPgid, 'SIGKILL');
     }
-    process.exit(interruptExitCode());
+    exitAfterDiscoveryCleanup();
+    return;
   }
   userInterrupted = true;
   interruptSignal = signal;
@@ -848,10 +903,24 @@ function onSignal(signal) {
       `\ncli-relay: ${signal} received — finishing in-flight bookkeeping before exit ` +
       '(Ctrl-C again to force)...',
     );
+  } else if (activeDiscoveryCount() > 0) {
+    console.error(`\ncli-relay: ${signal} received — terminating backend discovery and exiting.`);
+    exitAfterDiscoveryCleanup();
   } else {
     console.error(`\ncli-relay: ${signal} received, nothing spawned yet — exiting.`);
     process.exit(interruptExitCode());
   }
+}
+
+// Discovery children (model listings, help reads) run detached, so a terminal signal does
+// not reach them; kill them before exiting, awaiting taskkill on Windows.
+function exitAfterDiscoveryCleanup() {
+  const pending = terminateDiscoveryChildren();
+  if (pending) {
+    pending.then(() => process.exit(interruptExitCode()));
+    return;
+  }
+  process.exit(interruptExitCode());
 }
 
 process.on('SIGINT', () => onSignal('SIGINT'));

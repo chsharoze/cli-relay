@@ -1,0 +1,719 @@
+{
+  "cwd": "/",
+  "adapters": {
+    "codex": {
+      "fresh:plain": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:plain": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "fresh:model": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:model": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ],
+      "fresh:mode": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:mode": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "fresh:model+mode": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:model+mode": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ]
+    },
+    "agy": {
+      "fresh:plain": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:plain": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ],
+      "fresh:model": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:model": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ],
+      "fresh:mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ],
+      "fresh:model+mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:model+mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ]
+    },
+    "claude-code": {
+      "fresh:plain": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "resume:plain": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "fresh:model": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ],
+      "resume:model": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ],
+      "fresh:mode": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "resume:mode": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "fresh:model+mode": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ],
+      "resume:model+mode": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ]
+    },
+    "command-code": {
+      "fresh:plain": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "zai-org/glm-5.2",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:plain": null,
+      "fresh:model": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "snapshot-model",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:model": null,
+      "fresh:mode": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "zai-org/glm-5.2",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:mode": null,
+      "fresh:model+mode": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "snapshot-model",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:model+mode": null
+    }
+  },
+  "cli": {
+    "codex": {
+      "fresh:plain": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:plain": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "fresh:model": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:model": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ],
+      "fresh:mode": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:mode": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "gpt-6.1-sol",
+        "--json",
+        "snapshot prompt"
+      ],
+      "fresh:model+mode": [
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ],
+      "resume:model+mode": [
+        "codex",
+        "exec",
+        "resume",
+        "native-snapshot-id",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        "snapshot-model",
+        "--json",
+        "snapshot prompt"
+      ]
+    },
+    "agy": {
+      "fresh:plain": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:plain": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ],
+      "fresh:model": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:model": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ],
+      "fresh:mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "gemini-3.8-flash-medium",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ],
+      "fresh:model+mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "-p",
+        "snapshot prompt"
+      ],
+      "resume:model+mode": [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print-timeout",
+        "10m",
+        "--model",
+        "snapshot-model",
+        "--mode",
+        "plan",
+        "--add-dir",
+        "/",
+        "--output-format",
+        "json",
+        "--conversation",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt"
+      ]
+    },
+    "claude-code": {
+      "fresh:plain": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "resume:plain": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "fresh:model": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ],
+      "resume:model": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ],
+      "fresh:mode": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "resume:mode": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions"
+      ],
+      "fresh:model+mode": [
+        "claude",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ],
+      "resume:model+mode": [
+        "claude",
+        "-r",
+        "native-snapshot-id",
+        "-p",
+        "snapshot prompt",
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+        "--model",
+        "snapshot-model"
+      ]
+    },
+    "command-code": {
+      "fresh:plain": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "zai-org/glm-5.2",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:plain": {
+        "exit": 1
+      },
+      "fresh:model": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "snapshot-model",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:model": {
+        "exit": 1
+      },
+      "fresh:mode": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "zai-org/glm-5.2",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:mode": {
+        "exit": 1
+      },
+      "fresh:model+mode": [
+        "command-code",
+        "-p",
+        "snapshot prompt",
+        "-m",
+        "snapshot-model",
+        "--output-format",
+        "json",
+        "--yolo",
+        "--no-auto-update"
+      ],
+      "resume:model+mode": {
+        "exit": 1
+      }
+    }
+  }
+}
