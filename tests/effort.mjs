@@ -69,6 +69,7 @@ const AGY_LISTING_TEXT = [
   'gemini-3.8-flash-medium\tGemini 3.8 Flash (medium)',
   'gemini-3.8-flash-high\tGemini 3.8 Flash (high)',
   'gemini-4-argon-low\tGemini 4 Argon (low)',
+  'gemini-4-argon-medium\tGemini 4 Argon (medium)',
   'claude-sonnet-5-5-high\tClaude Sonnet 5.5 (high)',
 ].join('\n');
 
@@ -176,7 +177,7 @@ try {
   const { parseEffortHelp, EFFORT_SUFFIXES } = await import('../src/core/effort.mjs');
   const { DISCOVERY_TIMEOUT_MS, discoveryTimeoutMs } = await import('../src/core/discovery.mjs');
   const { parseCodexModelsCache } = await import('../src/adapters/codex.mjs');
-  const { agyEffortModel, parseAgyModels } = await import('../src/adapters/agy.mjs');
+  const { agyEffortModel, agyModelEffort, parseAgyModels } = await import('../src/adapters/agy.mjs');
   const adapterModules = {};
   for (const name of ['codex', 'agy', 'claude-code', 'command-code']) {
     adapterModules[name] = (await import(pathToFileURL(join(ROOT, 'src/adapters', `${name}.mjs`)).href)).default;
@@ -386,29 +387,47 @@ try {
 
   await test('agy listing parser drops the progress line and display names', () => {
     assert.deepEqual(parseAgyModels(AGY_LISTING_TEXT), [
-      'gemini-3.8-flash-medium', 'gemini-3.8-flash-high', 'gemini-4-argon-low', 'claude-sonnet-5-5-high',
+      'gemini-3.8-flash-medium', 'gemini-3.8-flash-high', 'gemini-4-argon-low', 'gemini-4-argon-medium',
+      'claude-sonnet-5-5-high',
     ]);
   });
 
   // --- the agy rule ---
-  await test('agyEffortModel covers swap, unlisted, unavailable and unsuffixed cases', () => {
+  await test('agyEffortModel never pairs a suffixed id with --effort', () => {
     const ids = parseAgyModels(AGY_LISTING_TEXT);
     assert.deepEqual(EFFORT_SUFFIXES, ['low', 'medium', 'high', 'xhigh', 'max']);
+    assert.equal(agyModelEffort('gemini-3.8-flash-medium'), 'medium');
+    assert.equal(agyModelEffort('plain'), null);
+    // Swap when listed.
     assert.deepEqual(agyEffortModel('gemini-3.8-flash-medium', 'high', ids),
-      { model: 'gemini-3.8-flash-high', effort: undefined, warning: null });
-    const unlisted = agyEffortModel('gemini-4-argon-low', 'max', ids);
-    assert.equal(unlisted.model, 'gemini-4-argon-low');
-    assert.equal(unlisted.effort, 'max');
-    assert.match(unlisted.warning, /gemini-4-argon-max/);
-    assert.deepEqual(agyEffortModel('gemini-3.8-flash-medium', 'high', null),
-      { model: 'gemini-3.8-flash-medium', effort: 'high', warning: null });
-    assert.deepEqual(agyEffortModel('plain', 'high', ids), { model: 'plain', effort: 'high', warning: null });
+      { model: 'gemini-3.8-flash-high', effort: undefined });
+    // Suffix already at the level: unchanged, listing irrelevant.
+    assert.deepEqual(agyEffortModel('gemini-3.8-flash-medium', 'medium', null),
+      { model: 'gemini-3.8-flash-medium', effort: undefined });
+    // Unlisted sibling from a flag: usage error naming the family's listed levels.
+    const flagged = agyEffortModel('gemini-4-argon-low', 'max', ids, 'flag');
+    assert.equal(flagged.model, 'gemini-4-argon-low');
+    assert.equal(flagged.effort, undefined);
+    assert.equal(flagged.error,
+      'agy lists no model "gemini-4-argon-max" — gemini-4-argon-* is listed with efforts: low, medium');
+    // Unlisted sibling from config: dropped with a warning, id kept, no --effort.
+    const configured = agyEffortModel('gemini-4-argon-low', 'max', ids, 'config');
+    assert.deepEqual([configured.model, configured.effort, configured.dropped, configured.error],
+      ['gemini-4-argon-low', undefined, true, undefined]);
+    assert.match(configured.warning, /ignoring the configured effort and keeping "gemini-4-argon-low"/);
+    // Listing unavailable: blind swap with one warning.
+    const blind = agyEffortModel('gemini-3.8-flash-medium', 'xhigh', null);
+    assert.deepEqual([blind.model, blind.effort], ['gemini-3.8-flash-xhigh', undefined]);
+    assert.match(blind.warning, /listing unavailable; using "gemini-3\.8-flash-xhigh"/);
+    // Unsuffixed id: plain --effort.
+    assert.deepEqual(agyEffortModel('plain', 'high', ids), { model: 'plain', effort: 'high' });
+    assert.deepEqual(agyEffortModel('plain', 'high', null), { model: 'plain', effort: 'high' });
   });
 
-  const agyArgv = (model, effort) => [
+  const agyArgv = (model, effort, extra = []) => [
     'agy', '--dangerously-skip-permissions', '--print-timeout', '10m', '--model', model,
     ...(effort ? ['--effort', effort] : []),
-    '--add-dir', '/', '--output-format', 'json', '-p', 'p',
+    '--add-dir', '/', '--output-format', 'json', ...extra, '-p', 'p',
   ];
 
   await test('agy rule: the default model swaps to its listed sibling with no --effort', () => {
@@ -418,40 +437,62 @@ try {
     assert.deepEqual(warnings(result.err), []);
   });
 
-  await test('agy rule: an explicit suffixed model swaps when listed', () => {
+  await test('agy rule: an effort equal to the suffix keeps the id and spawns no listing', () => {
+    const result = printed(['--effort', 'medium', 'agy', 't', 'fresh', 'p']);
+    assert.deepEqual(result.argv, agyArgv('gemini-3.8-flash-medium'));
+    assert.deepEqual(result.calls, []);
+    assert.deepEqual(warnings(result.err), []);
+  });
+
+  await test('agy rule: an explicit suffixed model swaps when listed, also on resume', () => {
     const swap = printed(['--model', 'gemini-3.8-flash-high', '--effort', 'medium', 'agy', 't', 'fresh', 'p']);
     assert.deepEqual(swap.argv, agyArgv('gemini-3.8-flash-medium'));
     assert.deepEqual(warnings(swap.err), []);
-    const same = printed(['--model', 'claude-sonnet-5-5-high', '--effort', 'high', 'agy', 't', 'fresh', 'p']);
-    assert.deepEqual(same.argv, agyArgv('claude-sonnet-5-5-high'));
+    const home = makeHome({ sessions: { r: confirmedSession('agy') } });
+    const resumed = printed(['--model', 'gemini-4-argon-low', '--effort', 'medium', 'agy', 'r', 'resume', 'p'], { home });
+    assert.deepEqual(resumed.argv, agyArgv('gemini-4-argon-medium', undefined, ['--conversation', 'native-agy']));
   });
 
-  await test('agy rule: an unlisted sibling keeps the id, adds --effort and warns once', () => {
-    const result = printed(['--effort', 'low', 'agy', 't', 'fresh', 'p']);
-    assert.deepEqual(result.argv, agyArgv('gemini-3.8-flash-medium', 'low'));
+  await test('agy rule: an unlisted sibling from --effort is a usage error before any dispatch', () => {
+    for (const dry of [true, false]) {
+      const result = run([...(dry ? ['--print-command'] : []),
+        '--model', 'gemini-4-argon-low', '--effort', 'max', 'agy', 't', 'fresh', 'p']);
+      assert.equal(result.code, 2, result.err);
+      assert.equal(result.out, '');
+      assert.match(result.err, /^agy lists no model "gemini-4-argon-max" — gemini-4-argon-\* is listed with efforts: low, medium$/m);
+      assert.deepEqual(result.calls, ['agy models']);
+    }
+  });
+
+  await test('agy rule: an unlisted sibling from config warns, drops the effort and keeps the id', () => {
+    const home = makeHome({ config: { backends: { agy: { model: 'gemini-4-argon-low', effort: 'max' } } } });
+    const result = printed(['agy', 't', 'fresh', 'p'], { home });
+    assert.deepEqual(result.argv, agyArgv('gemini-4-argon-low'));
     assert.deepEqual(warnings(result.err), [
-      'warning: agy lists no model "gemini-3.8-flash-low"; keeping "gemini-3.8-flash-medium" and passing --effort low',
+      'warning: agy lists no model "gemini-4-argon-max" — gemini-4-argon-* is listed with efforts: low, medium; ' +
+        'ignoring the configured effort and keeping "gemini-4-argon-low"',
     ]);
   });
 
-  await test('agy rule: a failing listing means no swap and only the discovery warning', () => {
+  await test('agy rule: a failing listing swaps blind with a warning', () => {
     const result = printed(['--effort', 'high', 'agy', 't', 'fresh', 'p'], { agyModels: 'fail' });
-    assert.deepEqual(result.argv, agyArgv('gemini-3.8-flash-medium', 'high'));
+    assert.deepEqual(result.argv, agyArgv('gemini-3.8-flash-high'));
     const lines = warnings(result.err);
-    assert.equal(lines.length, 1);
+    assert.equal(lines.length, 2, lines.join('\n'));
     assert.match(lines[0], /discovery "agy models" failed \(exited 1\)/);
+    assert.match(lines[1], /listing unavailable; using "gemini-3\.8-flash-high"/);
   });
 
-  await test('agy rule: a hanging listing times out, does not swap, and kills the child', () => {
+  await test('agy rule: a hanging listing times out, swaps blind, and kills the child', () => {
     const started = Date.now();
-    const result = printed(['--effort', 'high', 'agy', 't', 'fresh', 'p'], {
+    const result = printed(['--effort', 'low', 'agy', 't', 'fresh', 'p'], {
       agyModels: 'hang', env: { CLI_RELAY_DISCOVERY_TIMEOUT_MS: '400' },
     });
     const elapsed = Date.now() - started;
     assert.ok(elapsed < 10_000, `took ${elapsed}ms`);
-    assert.deepEqual(result.argv, agyArgv('gemini-3.8-flash-medium', 'high'));
+    assert.deepEqual(result.argv, agyArgv('gemini-3.8-flash-low'));
     const lines = warnings(result.err);
-    assert.equal(lines.length, 1);
+    assert.equal(lines.length, 2, lines.join('\n'));
     assert.match(lines[0], /discovery "agy models" failed \(timed out after 0\.4s\)/);
   });
 

@@ -117,16 +117,21 @@ exactly what it was before the flag existed.
 
 **agy and effort-suffixed model ids.** agy model ids carry an effort suffix
 (`gemini-3.8-flash-medium`, `gemini-4-argon-low`, `claude-sonnet-5-5-high`) and agy also
-accepts `--effort`. When an effort is given for agy, cli-relay looks at the model the call
-would use, including the built-in default:
-- an id ending in `-low`, `-medium`, `-high`, `-xhigh` or `-max` triggers a live
-  `agy models` listing; if the same id with the suffix swapped for the requested level is
-  listed, that id is used and no `--effort` is passed (`gemini-3.8-flash-medium` with
-  `--effort high` becomes `gemini-3.8-flash-high`);
-- if the swapped id is not listed, the id is kept, `--effort <level>` is added, and one
-  `warning:` line goes to stderr;
-- if the listing is unavailable (error or timeout), nothing is swapped: the id is kept and
-  `--effort <level>` is added, with no warning beyond the discovery warning;
+accepts `--effort`, but it rejects a suffixed id combined with a different `--effort`. So
+cli-relay never sends a suffixed id together with `--effort`. When an effort is given for
+agy, it looks at the model the call would use, including the built-in default:
+- an id whose suffix already equals the requested level is kept as is, with no `--effort`
+  and no listing spawn;
+- otherwise a suffixed id (`-low`, `-medium`, `-high`, `-xhigh`, `-max`) triggers a live
+  `agy models` listing, and if the same id with the suffix swapped for the requested level is
+  listed, that id is used with no `--effort` (`gemini-3.8-flash-medium` with `--effort high`
+  becomes `gemini-3.8-flash-high`, on fresh and resume alike);
+- if the swapped id is not listed, an `--effort` flag is a usage error (exit 2, before
+  anything is dispatched) naming the levels that model family does list; an effort from the
+  `backends` config is dropped with one `warning:` line and the id is kept, the same
+  source-aware handling as codex;
+- if the listing is unavailable (error or timeout), the suffix is swapped without checking,
+  with one `warning:` line in addition to the discovery warning;
 - an id without an effort suffix just gets `--effort <level>`.
 
 The rule lives in one exported function, `agyEffortModel` in `src/adapters/agy.mjs`.
