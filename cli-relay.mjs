@@ -565,7 +565,11 @@ async function main() {
     modelFlag: modelValue,
     effortFlag: effortValue,
   });
-  const { model, effort } = await prepareDispatch(backend, adapter, settings);
+  const { model, effort, effortUsed } = await prepareDispatch(backend, adapter, settings);
+  // What the call actually runs with, for the ledger and the session map: the resolved
+  // model or, when none was resolved, the adapter's declared built-in default.
+  const recordedModel = model ?? adapter.defaultModel ?? null;
+  const recordedEffort = effortUsed ?? null;
 
   if (dryRun) {
     const map = loadMap();
@@ -588,6 +592,8 @@ async function main() {
     tier: tier.level,
     tier_name: tier.name,
     gate_allowed: true,
+    model: recordedModel,
+    effort: recordedEffort,
   };
 
   try {
@@ -625,6 +631,8 @@ async function main() {
 
     session.status = 'running';
     session.run_started_iso = new Date().toISOString();
+    session.last_model = recordedModel;
+    session.last_effort = recordedEffort;
     map.sessions[thread] = session;
     saveMap(map);
     return { ...session };
