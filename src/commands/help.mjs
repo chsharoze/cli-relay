@@ -23,7 +23,7 @@ export const USAGE_LINES = Object.freeze([
 const FLAG_LINES = Object.freeze([
   ['--model <name>', 'model for this call, passed to the backend verbatim'],
   ['--effort <level>', 'reasoning effort for this call (lowercase letters, e.g. low, high)'],
-  ['--max-stdout-mb <n>', 'stdout buffer limit for this call, 1-1024 MiB (default 64)'],
+  ['--max-stdout-mb <n>', 'stdout buffer limit for this call, 1-256 MiB (default 64)'],
   ['--mode <name>', 'backend mode for this call, passed through (agy: e.g. plan)'],
   ['--tier <1-4|name>', 'read-only (1, default), local (2), reversible-remote (3), irreversible (4)'],
   ['--confirm', 'required to dispatch at tier 3 or 4'],

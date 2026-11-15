@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { StringDecoder } from 'node:string_decoder';
+import { collectOutput } from '../src/core/output-collector.mjs';
 import vm from 'node:vm';
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -132,6 +133,7 @@ try {
     const spawns = [];
     const context = vm.createContext({
       StringDecoder,
+      collectOutput,
       console,
       process: { platform, exit: (code) => exits.push(code) },
       killProcessTree,

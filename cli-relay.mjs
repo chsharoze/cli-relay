@@ -31,7 +31,6 @@
  */
 
 import { spawn } from 'node:child_process';
-import { StringDecoder } from 'node:string_decoder';
 import { cmdAuditVerify } from './src/commands/audit.mjs';
 import { cmdDoctor } from './src/commands/doctor.mjs';
 import { cmdHelp, USAGE_LINES } from './src/commands/help.mjs';
@@ -58,6 +57,7 @@ import {
 } from './src/core/dispatch-settings.mjs';
 import { activeDiscoveryCount, terminateDiscoveryChildren } from './src/core/discovery.mjs';
 import { isEffortLevel } from './src/core/effort.mjs';
+import { collectOutput } from './src/core/output-collector.mjs';
 import { resolveMaxStdout, STDOUT_LIMIT_HOW_TO_RAISE } from './src/core/stdout-limit.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
@@ -76,31 +76,6 @@ let interruptSignal = null;
 
 function interruptExitCode() {
   return 128 + (interruptSignal === 'SIGTERM' ? 15 : 2);
-}
-
-function collectOutput(limitBytes, tailLength) {
-  const decoder = new StringDecoder('utf8');
-  let text = '';
-  let bytes = 0;
-  let overflow = false;
-  const append = (chunk) => {
-    text += chunk;
-    if (overflow) {
-      text = text.slice(-tailLength);
-      // A retained tail must not start halfway through a decoded surrogate pair.
-      if (text.charCodeAt(0) >= 0xdc00 && text.charCodeAt(0) <= 0xdfff) text = text.slice(1);
-    }
-  };
-  return {
-    write(data) {
-      bytes += data.length;
-      if (bytes > limitBytes) overflow = true;
-      append(decoder.write(data));
-    },
-    end() { append(decoder.end()); },
-    text: () => text,
-    overflowed: () => overflow,
-  };
 }
 
 function runChild(argv, env, maxStdoutBytes) {

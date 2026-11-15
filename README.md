@@ -277,15 +277,22 @@ dispatch and `cli-relay help`) and ignored; one bad entry never fails a command.
 `backends` key nothing changes. `cli-relay help` shows the effective defaults.
 
 **Stdout limit.** A call's backend stdout is buffered for parsing up to 64 MiB by default.
-Past the limit the output is still drained and its tail is printed, but the call is refused
-(exit 1, no session confirmed) rather than parsed from truncated text. Raise or lower it, highest
-first: `--max-stdout-mb <n>` (whole MiB, 1 to 1024, before `<fresh|resume>`), then the
-`CLI_RELAY_MAX_STDOUT_MB` environment variable, then `maxStdoutMb` under `backends.<name>`,
-then `maxStdoutMb` at the top of `config.json`, then the default. A value outside 1..1024 or
-not a whole number is a usage error (exit 2) from whichever source supplied it; it is never
-skipped for a lower one. The trade-off: the whole output is held in memory, so a higher limit
-lets longer runs finish but costs up to that much memory per call. `cli-relay help` shows the
-effective limit per backend.
+Past the limit the output is still drained and only its tail is kept, and the call is refused
+rather than parsed from truncated text. On `fresh` this exits 1: the session is not confirmed
+and its status returns to `ready`. On `resume` the stored session id is left unchanged and the
+failure counts as a failed resume (the counter rises, and the thread is un-confirmed only once
+it reaches the consecutive-failure threshold). The exit code is 3 when the backend itself
+exited 0, otherwise the backend's own exit code (1 if it has none). Either way a diagnostic
+naming the limit goes to stderr. Raise or lower it, highest first: `--max-stdout-mb <n>` (whole
+MiB, 1 to 256, before `<fresh|resume>`), then the `CLI_RELAY_MAX_STDOUT_MB` environment
+variable, then `maxStdoutMb` under `backends.<name>`, then `maxStdoutMb` at the top of
+`config.json`, then the default. An empty or whitespace-only environment value and a `null`
+config value count as unset. Any other value outside 1..256 or not a whole number is a usage
+error (exit 2) from whichever source supplied it; it is never skipped for a lower one. The cap
+is 256 MiB because output is held as one string. The limit does not bound peak memory: the
+output is held in memory and decoding and copying can use several times the stdout size, so a
+higher limit costs correspondingly more. If appending output fails for any reason, the call is
+treated exactly like a limit breach. `cli-relay help` shows the effective limit per backend.
 
 Ledger writers share a lock derived from the ledger's canonical path, independently
 of their session-map paths. Symlink aliases are supported; hard-linked ledger files
@@ -416,7 +423,8 @@ the mocked branch tests do not substitute for that platform validation.
 
 `tests/stdout-limit.mjs` covers the stdout limit hermetically (a fake backend binary, temporary
 HOME): the 64 MiB default, the flag, environment variable and config sources, their precedence,
-output just under and over a limit, and invalid values.
+output just under and over a limit, byte-based counting across multibyte characters, overflow
+on `resume`, forced append failures, and invalid, empty and `null` values.
 
 `tests/effort.mjs` covers `--effort`, the agy rule, the discovery timeout, `cli-relay models`,
 `cli-relay help`, the `backends` config defaults and model/effort recording, hermetically
