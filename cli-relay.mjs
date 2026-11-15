@@ -3,7 +3,7 @@
  * cli-relay.mjs — persistent CLI router: resume-by-reference across pluggable backends.
  *
  * Usage:
- *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--effort <level>]
+ *   cli-relay [--dry-run|--print-command] [--tier <1-4|name>] [--model <name>] [--effort <level>] [--max-stdout-mb <n>]
  *     [--mode <name>] [--confirm] <backend> <thread> <fresh|resume> <prompt...>
  *   cli-relay list
  *   cli-relay doctor
@@ -58,6 +58,7 @@ import {
 } from './src/core/dispatch-settings.mjs';
 import { activeDiscoveryCount, terminateDiscoveryChildren } from './src/core/discovery.mjs';
 import { isEffortLevel } from './src/core/effort.mjs';
+import { resolveMaxStdout, STDOUT_LIMIT_HOW_TO_RAISE } from './src/core/stdout-limit.mjs';
 import { scrubEnv } from './src/core/env.mjs';
 import { RelayError } from './src/core/errors.mjs';
 import { withLock } from './src/core/lock.mjs';
@@ -76,8 +77,6 @@ let interruptSignal = null;
 function interruptExitCode() {
   return 128 + (interruptSignal === 'SIGTERM' ? 15 : 2);
 }
-
-const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
 
 function collectOutput(limitBytes, tailLength) {
   const decoder = new StringDecoder('utf8');
@@ -104,7 +103,7 @@ function collectOutput(limitBytes, tailLength) {
   };
 }
 
-function runChild(argv, env) {
+function runChild(argv, env, maxStdoutBytes) {
   return new Promise((resolve) => {
     const child = spawn(argv[0], argv.slice(1), {
       env,
@@ -115,7 +114,7 @@ function runChild(argv, env) {
     activeChildPgid = pgid;
     // Keep complete stdout only while it is safe to parse. After the limit, drain
     // both streams but retain diagnostic tails and reject the truncated response.
-    const out = collectOutput(MAX_STDOUT_BYTES, 4000);
+    const out = collectOutput(maxStdoutBytes, 4000);
     const err = collectOutput(0, 16000);
     let timedOut = false;
     let cancelled = false;
@@ -246,7 +245,7 @@ function printUsage(backends) {
 }
 
 // Governance/routing flags (--dry-run, --print-command, --tier, --model, --mode, --effort,
-// --confirm) are only recognized before the third positional routing argument (mode:
+// --max-stdout-mb, --confirm) are only recognized before the third positional routing argument (mode:
 // fresh/resume) is collected. Once mode is filled in, every remaining word is prompt text
 // by definition and must never be reinterpreted as a flag -- a prompt that happens to contain the
 // literal word "--confirm" (or "--tier", "--dry-run") as one of its tokens must not be
@@ -266,6 +265,8 @@ function parseDispatchFlags(cliArgs) {
   let modeSeen = false;
   let effortValue;
   let effortSeen = false;
+  let maxStdoutValue;
+  let maxStdoutSeen = false;
   const routingArgs = [];
 
   for (let index = 0; index < cliArgs.length; index += 1) {
@@ -387,9 +388,35 @@ function parseDispatchFlags(cliArgs) {
       }
       continue;
     }
+    if (argument === '--max-stdout-mb' || argument.startsWith('--max-stdout-mb=')) {
+      if (maxStdoutSeen) {
+        throw new RelayError(
+          'INVALID_MAX_STDOUT',
+          '--max-stdout-mb may be provided only once',
+          { exitCode: 2 },
+        );
+      }
+      maxStdoutSeen = true;
+      if (argument === '--max-stdout-mb') {
+        maxStdoutValue = cliArgs[index + 1];
+        index += 1;
+      } else {
+        maxStdoutValue = argument.slice('--max-stdout-mb='.length);
+      }
+      if (maxStdoutValue == null || maxStdoutValue === '' || maxStdoutValue.startsWith('--')) {
+        throw new RelayError(
+          'INVALID_MAX_STDOUT',
+          '--max-stdout-mb requires a whole number of MiB',
+          { exitCode: 2 },
+        );
+      }
+      continue;
+    }
     routingArgs.push(argument);
   }
-  return { dryRun, confirm, tierValue, modelValue, modeValue, effortValue, routingArgs };
+  return {
+    dryRun, confirm, tierValue, modelValue, modeValue, effortValue, maxStdoutValue, routingArgs,
+  };
 }
 
 function sessionForInvocation(map, backend, thread, mode, adapter) {
@@ -504,7 +531,7 @@ async function main() {
   }
 
   const {
-    dryRun, confirm, tierValue, modelValue, modeValue, effortValue, routingArgs,
+    dryRun, confirm, tierValue, modelValue, modeValue, effortValue, maxStdoutValue, routingArgs,
   } = parseDispatchFlags(cliArgs);
   const [backend, thread, mode, ...rest] = routingArgs;
   const prompt = rest.join(' ');
@@ -567,6 +594,8 @@ async function main() {
     modelFlag: modelValue,
     effortFlag: effortValue,
   });
+  // Resolved before any state is touched, so a bad value is a usage error even on a dry run.
+  const stdoutLimit = resolveMaxStdout(backend, { flagValue: maxStdoutValue });
 
   if (dryRun) {
     const map = loadMap();
@@ -657,9 +686,12 @@ async function main() {
     ? adapter.resume(record.native_session_id, augmentedPrompt, model, modeValue, effort)
     : adapter.fresh(augmentedPrompt, model, modeValue, effort);
   const env = scrubEnv(adapter.env);
-  const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env);
+  const { code, signal, out, err, timedOut, cancelled, outputOverflow } = await runChild(argv, env, stdoutLimit.bytes);
   if (outputOverflow) {
-    console.error(`"${backend}" stdout exceeded the ${MAX_STDOUT_BYTES}-byte limit; refusing to parse truncated output.`);
+    console.error(
+      `"${backend}" stdout exceeded the ${stdoutLimit.mb} MiB limit (${stdoutLimit.bytes} bytes); ` +
+      `refusing to parse truncated output. To allow more, ${STDOUT_LIMIT_HOW_TO_RAISE}.`,
+    );
   }
   const classifiedFailure = typeof adapter.classifyFailure === 'function' &&
     adapter.classifyFailure(out, err);

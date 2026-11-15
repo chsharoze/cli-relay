@@ -103,7 +103,7 @@ export const LEDGER_PATH = LEDGER_PATH_CONFIG_ERROR
 export const LOCK_PATH = `${MAP_PATH}.lock`;
 export const LOCK_STALE_MS = SPAWN_TIMEOUT_MS + LOCK_STALE_GRACE_MS;
 
-// Optional per-backend defaults: { "backends": { "<name>": { "model"?, "effort"? } } }.
+// Optional per-backend defaults: { "backends": { "<name>": { "model"?, "effort"?, "maxStdoutMb"? } } }.
 // Read outside the throwing validation above, like LEDGER_PATH: a malformed entry or value
 // is reported as a warning and ignored, so it can never take down any command. Backend
 // names are checked against the loaded adapters where they are used (core/
@@ -132,6 +132,10 @@ function loadBackendDefaults(raw) {
       } else if (key === 'effort') {
         if (typeof value === 'string' && EFFORT_VALUE.test(value)) accepted.effort = value;
         else warnings.push(`${CONFIG_PATH}: backends.${name}.effort must match ^[a-z]+$; ignoring it`);
+      } else if (key === 'maxStdoutMb') {
+        // Kept as written: core/stdout-limit.mjs validates it at dispatch and fails with a
+        // usage error, since a silently ignored limit would hide the refusal it controls.
+        accepted.maxStdoutMb = value;
       } else {
         warnings.push(`${CONFIG_PATH}: backends.${name}.${key} is not a known setting; ignoring it`);
       }
@@ -146,3 +150,9 @@ const backendDefaults = loadBackendDefaults(
 );
 export const BACKEND_DEFAULTS = Object.freeze(backendDefaults.defaults);
 export const BACKEND_DEFAULTS_WARNINGS = Object.freeze(backendDefaults.warnings);
+
+// Top-level stdout limit as written (validated at dispatch, see core/stdout-limit.mjs).
+export const GLOBAL_MAX_STDOUT_MB =
+  RAW_CONFIG && typeof RAW_CONFIG === 'object' && !Array.isArray(RAW_CONFIG)
+    ? RAW_CONFIG.maxStdoutMb
+    : undefined;

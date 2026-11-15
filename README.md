@@ -158,7 +158,8 @@ with `efforts`/`defaultEffort` null where unknown and `models` null for pass-thr
 
 `cli-relay help` (also `--help` or `-h` as the only argument) prints to stdout: the usage
 lines, one line per dispatch flag, the model and effort a call with no `--model`/`--effort`
-would use on each backend and where each comes from (env, config, or built-in), and this
+would use on each backend and where each comes from (env, config, or built-in), the effective
+stdout limit per backend, and this
 guide for choosing an effort. It spawns no backend; `cli-relay models` is the live menu.
 
 ```
@@ -274,6 +275,17 @@ model cache rules out is dropped with a warning rather than failing the call. Un
 names, unknown keys and malformed values are reported once each as `warning:` lines (by
 dispatch and `cli-relay help`) and ignored; one bad entry never fails a command. With no
 `backends` key nothing changes. `cli-relay help` shows the effective defaults.
+
+**Stdout limit.** A call's backend stdout is buffered for parsing up to 64 MiB by default.
+Past the limit the output is still drained and its tail is printed, but the call is refused
+(exit 1, no session confirmed) rather than parsed from truncated text. Raise or lower it, highest
+first: `--max-stdout-mb <n>` (whole MiB, 1 to 1024, before `<fresh|resume>`), then the
+`CLI_RELAY_MAX_STDOUT_MB` environment variable, then `maxStdoutMb` under `backends.<name>`,
+then `maxStdoutMb` at the top of `config.json`, then the default. A value outside 1..1024 or
+not a whole number is a usage error (exit 2) from whichever source supplied it; it is never
+skipped for a lower one. The trade-off: the whole output is held in memory, so a higher limit
+lets longer runs finish but costs up to that much memory per call. `cli-relay help` shows the
+effective limit per backend.
 
 Ledger writers share a lock derived from the ledger's canonical path, independently
 of their session-map paths. Symlink aliases are supported; hard-linked ledger files
@@ -402,6 +414,10 @@ also executes the real POSIX timeout, interrupt, and descendant-cleanup cases.
 Windows process-tree termination still requires a separate live Windows check;
 the mocked branch tests do not substitute for that platform validation.
 
+`tests/stdout-limit.mjs` covers the stdout limit hermetically (a fake backend binary, temporary
+HOME): the 64 MiB default, the flag, environment variable and config sources, their precedence,
+output just under and over a limit, and invalid values.
+
 `tests/effort.mjs` covers `--effort`, the agy rule, the discovery timeout, `cli-relay models`,
 `cli-relay help`, the `backends` config defaults and model/effort recording, hermetically
 (fake backend binaries, temporary HOME). It compares every adapter's flag-free argv against
@@ -412,6 +428,7 @@ are not exercised: the help-text and model-cache shapes are taken from observed 
 ```
 bash tests/smoke.sh
 node tests/effort.mjs
+node tests/stdout-limit.mjs
 ```
 
 ## Review history

@@ -786,7 +786,9 @@ assert '\ufffd' not in diagnostic, diagnostic
 SPLIT_STDERR_CHECK
 check "split UTF-8 stderr preserves complete characters" 0 "$?"
 
-PATH="$FAKE_DIR:$PATH" node --max-old-space-size=48 "$ROUTE" agy stdout-limit-smoke fresh STDOUT_CHATTER > "$WORK/stdout-limit.out" 2> "$WORK/stdout-limit.err"; stdout_limit_code=$?
+# The default limit is 64 MiB, which cannot be buffered under a 48 MiB heap, so this case
+# lowers the limit to 8 MiB through the environment; the 128 MiB output still overflows it.
+CLI_RELAY_MAX_STDOUT_MB=8 PATH="$FAKE_DIR:$PATH" node --max-old-space-size=48 "$ROUTE" agy stdout-limit-smoke fresh STDOUT_CHATTER > "$WORK/stdout-limit.out" 2> "$WORK/stdout-limit.err"; stdout_limit_code=$?
 check "128 MiB stdout is drained under a 48 MiB heap and rejected cleanly" 1 "$stdout_limit_code"
 python3 - "$MAP" "$WORK/stdout-limit.err" << 'STDOUT_LIMIT_CHECK'
 import json, sys
@@ -794,8 +796,8 @@ session = json.load(open(sys.argv[1]))['sessions']['stdout-limit-smoke']
 diagnostic = open(sys.argv[2]).read()
 assert session['status'] == 'ready' and not session['confirmed'], session
 assert session['native_session_id'] is None, session
-assert '8388608-byte limit' in diagnostic and 'CHATTER_END' in diagnostic, diagnostic
-assert len(diagnostic.encode()) < 8000, len(diagnostic)
+assert '8 MiB limit' in diagnostic and 'CLI_RELAY_MAX_STDOUT_MB' in diagnostic and 'CHATTER_END' in diagnostic, diagnostic
+assert len(diagnostic.encode()) < 8500, len(diagnostic)
 STDOUT_LIMIT_CHECK
 check "stdout overflow retains a bounded tail and never confirms a truncated result" 0 "$?"
 PATH="$FAKE_DIR:$PATH" node "$ROUTE" agy stdout-limit-smoke fresh RETRY > "$WORK/stdout-retry.out" 2> "$WORK/stdout-retry.err"; stdout_retry_code=$?
@@ -1534,6 +1536,11 @@ echo
 echo "== --effort, model/effort menu, help, backend config defaults, recording (hermetic) =="
 node "$(dirname "$ROUTE")/tests/effort.mjs" > /dev/null
 check "effort flag, discovery, menu, help, config defaults and recording" 0 "$?"
+
+echo
+echo "== stdout limit: default, flag, env, config, precedence (hermetic) =="
+node "$(dirname "$ROUTE")/tests/stdout-limit.mjs" > /dev/null
+check "stdout limit default, flag/env/config, precedence and invalid values" 0 "$?"
 
 rm -rf "$FAKE_DIR" "$WORK"
 
