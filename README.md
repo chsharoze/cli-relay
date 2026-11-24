@@ -409,7 +409,7 @@ exclusive holder write / pid reuse / stale reclaim, and `doctor`'s exit-code gat
 2026-09-07 gpt-6-astra fixes, further hermetic sections cover: atomic lock-holder publication
 under concurrency, stdout draining before exit on large responses, streaming UTF-8 decoding
 across split chunks, and bounded stdout/stderr collection under heavy chatter. Does not
-exercise `claude-code` (real billing per call) or `command-code` resume (disabled);
+exercise `claude-code` (each call uses real Claude usage) or `command-code` resume (disabled);
 `--dry-run` is still verified manually against the real backends whenever it changes (see
 the 2026-09-01 Review history entries below for what that's caught), not by an automated
 case in this file yet.
@@ -838,8 +838,9 @@ repo-mutation, wrong-path, and non-APPROVED-verdict rejection).
   `listBackendModels` path, without the 15 s discovery timeout that `cli-relay models` and
   dispatch-time discovery use — deliberately left unchanged when `--effort` was added, so a
   hanging listing can still hang `pick`.
-- `claude-code` calls hit real Anthropic billing against the Pro plan (confirmed ~$0.07-0.13
-  per short test call) — not free the way codex/agy effectively are for testing.
+- `claude-code` calls consume real Claude usage: with `CLAUDE_CODE_OAUTH_TOKEN` they count
+  against your Claude plan's usage limits, and with an API key they bill per token (a short test
+  call was ~$0.07-0.13 in API terms). Not free for testing the way codex/agy effectively are.
 - Grandchild processes that double-fork/setsid out of a backend's process group would survive
   a router-initiated kill (documented in `cli-relay.mjs`, not solved — no known instance of this
   happening yet).
